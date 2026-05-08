@@ -82,6 +82,12 @@
             <div class="welcome-mark__halo"></div>
             <div class="welcome-mark__core">
               <span class="welcome-mark__mind"></span>
+              <span class="welcome-mark__dragon">
+                <span class="welcome-mark__dragon-wing welcome-mark__dragon-wing--left"></span>
+                <span class="welcome-mark__dragon-wing welcome-mark__dragon-wing--right"></span>
+                <span class="welcome-mark__dragon-head"></span>
+                <span class="welcome-mark__dragon-eye"></span>
+              </span>
               <span class="welcome-mark__letter">B</span>
             </div>
           </div>

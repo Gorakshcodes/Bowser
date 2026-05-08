@@ -250,13 +250,100 @@ h1,
     linear-gradient(180deg, rgba(91, 95, 199, 0.16), rgba(91, 95, 199, 0.06));
 }
 
+.welcome-mark__dragon {
+  position: absolute;
+  width: 82px;
+  height: 82px;
+  display: block;
+  z-index: 1;
+}
+
+.welcome-mark__dragon-head {
+  position: absolute;
+  left: 18px;
+  top: 20px;
+  width: 48px;
+  height: 44px;
+  border-radius: 22px 24px 18px 20px;
+  background: linear-gradient(180deg, #6c63ff 0%, #3f44b8 100%);
+  transform: rotate(-12deg);
+  box-shadow:
+    inset -8px -8px 0 rgba(15, 23, 42, 0.08),
+    0 10px 18px rgba(63, 68, 184, 0.22);
+}
+
+.welcome-mark__dragon-head::before,
+.welcome-mark__dragon-head::after {
+  content: "";
+  position: absolute;
+  top: -7px;
+  width: 12px;
+  height: 16px;
+  background: linear-gradient(180deg, #ffd54f 0%, #ffb300 100%);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+.welcome-mark__dragon-head::before {
+  left: 8px;
+  transform: rotate(-18deg);
+}
+
+.welcome-mark__dragon-head::after {
+  right: 8px;
+  transform: rotate(18deg);
+}
+
+.welcome-mark__dragon-eye {
+  position: absolute;
+  left: 48px;
+  top: 36px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18);
+}
+
+.welcome-mark__dragon-eye::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #111827;
+}
+
+.welcome-mark__dragon-wing {
+  position: absolute;
+  top: 12px;
+  width: 28px;
+  height: 44px;
+  background: linear-gradient(180deg, rgba(79, 195, 247, 0.9), rgba(91, 95, 199, 0.65));
+  border-radius: 18px 18px 8px 8px;
+  clip-path: polygon(50% 0, 100% 34%, 86% 100%, 50% 76%, 14% 100%, 0 34%);
+  opacity: 0.9;
+}
+
+.welcome-mark__dragon-wing--left {
+  left: 4px;
+  transform: rotate(-20deg);
+}
+
+.welcome-mark__dragon-wing--right {
+  right: 4px;
+  transform: rotate(20deg);
+}
+
 .welcome-mark__letter {
   position: relative;
-  z-index: 1;
+  z-index: 2;
   font-family: "Space Grotesk", sans-serif;
   font-size: 3rem;
   font-weight: 700;
-  color: var(--accent-strong);
+  color: rgba(255, 255, 255, 0.96);
+  text-shadow: 0 8px 16px rgba(35, 56, 118, 0.28);
 }
 
 .auth-switch {
