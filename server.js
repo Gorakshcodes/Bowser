@@ -1078,9 +1078,8 @@ async function readZoomError(response) {
   }
 }
 
-module.exports = {
-  app,
-  buildDashboard,
-  isZoomConfigured,
-  normalizeExternalUrl
-};
+module.exports = app;
+module.exports.app = app;
+module.exports.buildDashboard = buildDashboard;
+module.exports.isZoomConfigured = isZoomConfigured;
+module.exports.normalizeExternalUrl = normalizeExternalUrl;
