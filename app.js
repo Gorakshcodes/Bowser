@@ -121,6 +121,7 @@
   function renderLoginForm() {
     return `
       <form class="form-grid" data-form="login">
+        <input name="role" type="hidden" value="${escapeAttribute(state.authRole)}">
         <div class="field">
           <label for="login-email">Email</label>
           <input id="login-email" name="email" type="email" placeholder="${state.authRole === "teacher" ? "teacher@example.com" : "student@example.com"}" required>
@@ -997,6 +998,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          role: String(formData.get("role") || state.authRole || "").trim(),
           email: String(formData.get("email") || "").trim(),
           password: String(formData.get("password") || "").trim()
         })

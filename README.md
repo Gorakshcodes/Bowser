@@ -60,7 +60,6 @@ Then open `http://localhost:3000`.
 - Static files are served by `server.js`.
 - Data is stored in `data/portal-data.json`.
 - Homework uploads are stored in `uploads/`.
-- first vercel deployment
 - Only `JPG`, `PNG`, `WEBP`, `HEIC`, and `HEIF` homework images up to `8 MB` are accepted.
 - Zoom integration uses Server-to-Server OAuth and creates meetings from the backend.
 - Teams support uses manual `teams.microsoft.com` or `teams.live.com` join links.

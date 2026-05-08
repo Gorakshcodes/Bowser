@@ -99,13 +99,17 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.post("/api/login", (req, res) => {
-  const { email, password } = req.body || {};
+  const { email, password, role } = req.body || {};
+  const normalizedRole = String(role || "").trim().toLowerCase();
   const database = readDatabase();
-  const user = database.users.find(
+  const matchingUsers = database.users.filter(
     (entry) =>
       entry.email.toLowerCase() === String(email || "").trim().toLowerCase() &&
       entry.password === String(password || "").trim()
   );
+  const user = ["teacher", "student"].includes(normalizedRole)
+    ? matchingUsers.find((entry) => entry.role === normalizedRole)
+    : matchingUsers[0];
 
   if (!user) {
     res.status(401).json({ error: "Invalid email or password." });
@@ -147,8 +151,8 @@ app.post("/api/register", (req, res) => {
   }
 
   const database = readDatabase();
-  if (database.users.some((entry) => entry.email.toLowerCase() === normalizedEmail)) {
-    res.status(409).json({ error: "An account with this email already exists." });
+  if (database.users.some((entry) => entry.role === normalizedRole && entry.email.toLowerCase() === normalizedEmail)) {
+    res.status(409).json({ error: `A ${normalizedRole} account with this email already exists.` });
     return;
   }
 
