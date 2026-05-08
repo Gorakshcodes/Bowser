@@ -1,0 +1,203 @@
+{
+  "users": [
+    {
+      "id": "student-4ef4448f-6e0e-4128-afee-2a827e78bfe0",
+      "role": "student",
+      "name": "Divit",
+      "email": "roophometv@gmail.com",
+      "password": "learn123"
+    },
+    {
+      "id": "teacher-db194e6b-59e3-46c4-9d31-be332df50b25",
+      "role": "teacher",
+      "name": "Roop",
+      "email": "roopnath.tanwar@gmail.com",
+      "password": "teach123",
+      "subject": "Science"
+    }
+  ],
+  "classes": [
+    {
+      "id": "class-30961515-3836-479b-acd3-1d509258ea4e",
+      "teacherId": "teacher-db194e6b-59e3-46c4-9d31-be332df50b25",
+      "teacherName": "Roop",
+      "subject": "Science",
+      "topic": "science sample",
+      "details": "sample",
+      "dateTime": "2026-04-20T17:39:00.000Z",
+      "durationMinutes": 45,
+      "studentIds": [
+        "student-4ef4448f-6e0e-4128-afee-2a827e78bfe0"
+      ],
+      "studentNames": [
+        "Divit"
+      ],
+      "meetingProvider": "teams",
+      "meetingMode": "manual",
+      "meetingLink": "",
+      "zoomLink": "",
+      "driveLink": "",
+      "zoomMeetingId": "",
+      "zoomStartUrl": "",
+      "createdAt": "2026-04-19T17:39:18.757Z"
+    },
+    {
+      "id": "class-33128b1e-7e3f-485c-96a4-8f01b89fe715",
+      "teacherId": "teacher-db194e6b-59e3-46c4-9d31-be332df50b25",
+      "teacherName": "Roop",
+      "subject": "Science",
+      "topic": "sample 2",
+      "details": "",
+      "dateTime": "2026-04-20T17:42:00.000Z",
+      "durationMinutes": 45,
+      "studentIds": [
+        "student-4ef4448f-6e0e-4128-afee-2a827e78bfe0"
+      ],
+      "studentNames": [
+        "Divit"
+      ],
+      "meetingProvider": "teams",
+      "meetingMode": "manual",
+      "meetingLink": "",
+      "zoomLink": "",
+      "driveLink": "",
+      "zoomMeetingId": "",
+      "zoomStartUrl": "",
+      "createdAt": "2026-04-19T17:43:12.785Z"
+    },
+    {
+      "id": "class-a9731634-2e7a-4ce5-9a93-09d09b65a16e",
+      "teacherId": "teacher-db194e6b-59e3-46c4-9d31-be332df50b25",
+      "teacherName": "Roop",
+      "subject": "Science",
+      "topic": "maths-room",
+      "details": "Roop",
+      "dateTime": "2026-04-25T15:37:00.000Z",
+      "durationMinutes": 45,
+      "studentIds": [
+        "student-4ef4448f-6e0e-4128-afee-2a827e78bfe0"
+      ],
+      "studentNames": [
+        "Divit"
+      ],
+      "meetingProvider": "zoom",
+      "meetingMode": "manual",
+      "meetingLink": "https://us05web.zoom.us/j/88968849299?pwd=ZeaMptwqKz4VdmPAh4lmlyRG2W4nbD.1",
+      "zoomLink": "https://us05web.zoom.us/j/88968849299?pwd=ZeaMptwqKz4VdmPAh4lmlyRG2W4nbD.1",
+      "driveLink": "",
+      "zoomMeetingId": "",
+      "zoomStartUrl": "",
+      "createdAt": "2026-04-24T15:38:18.391Z"
+    },
+    {
+      "id": "class-6255e369-c4d1-4046-9fe1-735bf5e603fd",
+      "teacherId": "teacher-db194e6b-59e3-46c4-9d31-be332df50b25",
+      "teacherName": "Roop",
+      "subject": "Science",
+      "topic": "Fiza",
+      "details": "English",
+      "dateTime": "2026-04-25T19:12:00.000Z",
+      "durationMinutes": 45,
+      "studentIds": [
+        "student-4ef4448f-6e0e-4128-afee-2a827e78bfe0"
+      ],
+      "studentNames": [
+        "Divit"
+      ],
+      "meetingProvider": "none",
+      "meetingMode": "none",
+      "meetingLink": "",
+      "zoomLink": "",
+      "driveLink": "",
+      "zoomMeetingId": "",
+      "zoomStartUrl": "",
+      "createdAt": "2026-04-24T19:12:57.922Z"
+    },
+    {
+      "id": "class-cd88b4e4-e562-4b74-8a6e-17284883b9f3",
+      "teacherId": "teacher-db194e6b-59e3-46c4-9d31-be332df50b25",
+      "teacherName": "Roop",
+      "subject": "Science",
+      "topic": "fiza English",
+      "details": "engaliosh lessons",
+      "dateTime": "2026-04-27T16:05:00.000Z",
+      "durationMinutes": 45,
+      "studentIds": [
+        "student-4ef4448f-6e0e-4128-afee-2a827e78bfe0"
+      ],
+      "studentNames": [
+        "Divit"
+      ],
+      "meetingProvider": "zoom",
+      "meetingMode": "auto",
+      "meetingLink": "https://us05web.zoom.us/j/87945329003?pwd=NRNzfoXKbao2WyTJxPLb1Cnt0NRjxz.1",
+      "zoomLink": "https://us05web.zoom.us/j/87945329003?pwd=NRNzfoXKbao2WyTJxPLb1Cnt0NRjxz.1",
+      "driveLink": "",
+      "zoomMeetingId": "87945329003",
+      "zoomStartUrl": "https://us05web.zoom.us/s/87945329003?zak=eyJ0eXAiOiJKV1QiLCJzdiI6IjAwMDAwMiIsInptX3NrbSI6InptX28ybSIsImFsZyI6IkhTMjU2In0.eyJpc3MiOiJ3ZWIiLCJjbHQiOjAsIm1udW0iOiI4Nzk0NTMyOTAwMyIsImF1ZCI6ImNsaWVudHNtIiwidWlkIjoiZ05RV1FSQ09SM2FLR1otNWI1VHE5dyIsInppZCI6IjM4ZThkZmI3ODVmNDQ3YWM5OTY2OWI5ZjA5MjllZGJkIiwic2siOiIwIiwic3R5IjoxLCJ3Y2QiOiJ1czA1IiwiZXhwIjoxNzc3MjI2NzQ5LCJpYXQiOjE3NzcyMTk1NDksImFpZCI6Im5BVnhSVXd2U2pHWVFJcWxVX01GcWciLCJjaWQiOiIifQ.7DSA2drHLfkqXNT8ynzix1Ud-OcTZaFT8luskrplXFY",
+      "createdAt": "2026-04-26T16:05:49.169Z"
+    },
+    {
+      "id": "class-34ac45ca-00f5-46cb-b98f-361bd3a90ad5",
+      "teacherId": "teacher-db194e6b-59e3-46c4-9d31-be332df50b25",
+      "teacherName": "Roop",
+      "subject": "Science",
+      "topic": "English Basic",
+      "details": "Basic foundation",
+      "dateTime": "2026-05-06T15:24:00.000Z",
+      "durationMinutes": 45,
+      "studentIds": [
+        "student-4ef4448f-6e0e-4128-afee-2a827e78bfe0"
+      ],
+      "studentNames": [
+        "Divit"
+      ],
+      "meetingProvider": "zoom",
+      "meetingMode": "auto",
+      "meetingLink": "https://us05web.zoom.us/j/89813071505?pwd=kbXtpuXIbkCwvwEbS5F4RNWUt9rowP.1",
+      "zoomLink": "https://us05web.zoom.us/j/89813071505?pwd=kbXtpuXIbkCwvwEbS5F4RNWUt9rowP.1",
+      "driveLink": "",
+      "zoomMeetingId": "89813071505",
+      "zoomStartUrl": "https://us05web.zoom.us/s/89813071505?zak=eyJ0eXAiOiJKV1QiLCJzdiI6IjAwMDAwMiIsInptX3NrbSI6InptX28ybSIsImFsZyI6IkhTMjU2In0.eyJpc3MiOiJ3ZWIiLCJjbHQiOjAsIm1udW0iOiI4OTgxMzA3MTUwNSIsImF1ZCI6ImNsaWVudHNtIiwidWlkIjoiZ05RV1FSQ09SM2FLR1otNWI1VHE5dyIsInppZCI6IjcxMTc1NDExZjk2NzRiNDRiMzc1MGVlMzhkOTJlNzU3Iiwic2siOiIwIiwic3R5IjoxLCJ3Y2QiOiJ1czA1IiwiZXhwIjoxNzc4MDAxOTAwLCJpYXQiOjE3Nzc5OTQ3MDAsImFpZCI6Im5BVnhSVXd2U2pHWVFJcWxVX01GcWciLCJjaWQiOiIifQ.cQ_Serhq5gDF8KADuVv8ae-f8Qo2Mvh-oelDiRFJbd0",
+      "createdAt": "2026-05-05T15:25:00.778Z"
+    },
+    {
+      "id": "class-0646c39e-1314-4319-acf9-af998a40922d",
+      "teacherId": "teacher-db194e6b-59e3-46c4-9d31-be332df50b25",
+      "teacherName": "Roop",
+      "subject": "Science",
+      "topic": "test Roop",
+      "details": "",
+      "dateTime": "2026-05-07T16:46:00.000Z",
+      "durationMinutes": 45,
+      "studentIds": [
+        "student-4ef4448f-6e0e-4128-afee-2a827e78bfe0"
+      ],
+      "studentNames": [
+        "Divit"
+      ],
+      "meetingProvider": "zoom",
+      "meetingMode": "auto",
+      "meetingLink": "https://us05web.zoom.us/j/89871511297?pwd=wTaleKWfHbOxfJVRHGpg9EelVbdb2b.1",
+      "zoomLink": "https://us05web.zoom.us/j/89871511297?pwd=wTaleKWfHbOxfJVRHGpg9EelVbdb2b.1",
+      "driveLink": "",
+      "zoomMeetingId": "89871511297",
+      "zoomStartUrl": "https://us05web.zoom.us/s/89871511297?zak=eyJ0eXAiOiJKV1QiLCJzdiI6IjAwMDAwMiIsInptX3NrbSI6InptX28ybSIsImFsZyI6IkhTMjU2In0.eyJpc3MiOiJ3ZWIiLCJjbHQiOjAsIm1udW0iOiI4OTg3MTUxMTI5NyIsImF1ZCI6ImNsaWVudHNtIiwidWlkIjoiZ05RV1FSQ09SM2FLR1otNWI1VHE5dyIsInppZCI6IjM1MWJlM2E3NDBmMzQ4ODA4MTNiNjY5ZTNjODVlNmVjIiwic2siOiIwIiwic3R5IjoxLCJ3Y2QiOiJ1czA1IiwiZXhwIjoxNzc4MDkzMjIzLCJpYXQiOjE3NzgwODYwMjMsImFpZCI6Im5BVnhSVXd2U2pHWVFJcWxVX01GcWciLCJjaWQiOiIifQ.uweDQVUGcUbRkIZSLdB031N7gwuLnpnM4fB0oiUbK6I",
+      "createdAt": "2026-05-06T16:47:03.963Z"
+    }
+  ],
+  "submissions": [
+    {
+      "id": "submission-23824817-7f49-462a-90bb-2005688e03f8",
+      "classId": "class-33128b1e-7e3f-485c-96a4-8f01b89fe715",
+      "studentId": "student-4ef4448f-6e0e-4128-afee-2a827e78bfe0",
+      "studentName": "Divit",
+      "subject": "Science",
+      "imageUrl": "/uploads/1776625000883-f26e1e34-dd53-4e9f-a9cb-e20cda82a96d.png",
+      "filePath": "/Users/roop/Desktop/Bowser/uploads/1776625000883-f26e1e34-dd53-4e9f-a9cb-e20cda82a96d.png",
+      "submittedAt": "2026-04-19T18:56:40.892Z",
+      "score": "9/10",
+      "feedback": "good"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "bowser-learning-portal",
+  "version": "1.0.0",
+  "description": "Teacher and student portal with Zoom scheduling and homework review",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.0.0"
+  }
+}
