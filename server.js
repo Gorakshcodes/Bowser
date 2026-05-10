@@ -11,6 +11,9 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const IS_VERCEL = Boolean(process.env.VERCEL);
 const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || "";
+const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "").trim();
+const ADMIN_NAME = String(process.env.ADMIN_NAME || "").trim() || "Bowser Admin";
 const STORAGE_MODE = DATABASE_URL ? "postgres" : (IS_VERCEL ? "runtime-file" : "file");
 const RUNTIME_ROOT = STORAGE_MODE === "file" ? __dirname : path.join("/tmp", "bowser-runtime");
 const DATA_DIR = path.join(RUNTIME_ROOT, "data");
@@ -142,12 +145,21 @@ app.post("/api/login", handleAsync(async (req, res) => {
         entry.email.toLowerCase() === String(email || "").trim().toLowerCase() &&
         entry.password === String(password || "").trim()
     );
-    const user = ["teacher", "student"].includes(normalizedRole)
+    const user = ["teacher", "student", "admin"].includes(normalizedRole)
       ? matchingUsers.find((entry) => entry.role === normalizedRole)
       : matchingUsers[0];
 
     if (!user) {
       res.status(401).json({ error: "Invalid email or password." });
+      return;
+    }
+
+    if (user.role !== "admin" && !isUserActive(user)) {
+      res.status(403).json({
+        error: user.activationStatus === "inactive"
+          ? "Your account is deactivated. Please contact admin."
+          : "Your account is waiting for admin activation."
+      });
       return;
     }
 
@@ -200,7 +212,10 @@ app.post("/api/register", handleAsync(async (req, res) => {
       role: normalizedRole,
       name: normalizedName,
       email: normalizedEmail,
-      password: normalizedPassword
+      password: normalizedPassword,
+      isActive: false,
+      activationStatus: "pending",
+      createdAt: new Date().toISOString()
     };
 
     if (normalizedRole === "teacher") {
@@ -211,8 +226,9 @@ app.post("/api/register", handleAsync(async (req, res) => {
     await writeDatabase(database);
 
     res.status(201).json({
-      user: sanitizeUser(user),
-      dashboard: await buildDashboard(user.id)
+      message: "Account created successfully. Please wait for admin activation before logging in.",
+      pendingApproval: true,
+      user: sanitizeUser(user)
     });
   } catch (error) {
     res.status(500).json({ error: error.message || "Could not create the account." });
@@ -225,7 +241,7 @@ app.get("/api/dashboard", handleAsync(async (req, res) => {
     const dashboard = await buildDashboard(userId);
     res.json(dashboard);
   } catch (error) {
-    res.status(error.message === "User not found." ? 404 : 500).json({ error: error.message });
+    res.status(error.statusCode || (error.message === "User not found." ? 404 : 500)).json({ error: error.message });
   }
 }));
 
@@ -248,7 +264,7 @@ app.post("/api/classes", handleAsync(async (req, res) => {
   const database = await readDatabase();
   const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
 
-  if (!teacher) {
+  if (!teacher || !isUserActive(teacher)) {
     res.status(403).json({ error: "Teacher account not found." });
     return;
   }
@@ -366,7 +382,7 @@ app.put("/api/classes/:classId", handleAsync(async (req, res) => {
   const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
   const classItem = database.classes.find((entry) => entry.id === classId);
 
-  if (!teacher || !classItem) {
+  if (!teacher || !isUserActive(teacher) || !classItem) {
     res.status(404).json({ error: "Teacher or class not found." });
     return;
   }
@@ -477,7 +493,7 @@ app.post("/api/submissions", handleHomeworkUpload, handleAsync(async (req, res) 
   const student = database.users.find((entry) => entry.id === studentId && entry.role === "student");
   const classItem = database.classes.find((entry) => entry.id === classId);
 
-  if (!student || !classItem) {
+  if (!student || !isUserActive(student) || !classItem) {
     cleanupFile(file.path);
     res.status(404).json({ error: "Student or class could not be found." });
     return;
@@ -536,7 +552,7 @@ app.put("/api/classes/:classId/meeting", handleAsync(async (req, res) => {
   const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
   const classItem = database.classes.find((entry) => entry.id === classId);
 
-  if (!teacher || !classItem) {
+  if (!teacher || !isUserActive(teacher) || !classItem) {
     res.status(404).json({ error: "Teacher or class not found." });
     return;
   }
@@ -608,7 +624,7 @@ app.put("/api/submissions/:submissionId/grade", handleAsync(async (req, res) => 
   const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
   const submission = database.submissions.find((entry) => entry.id === submissionId);
 
-  if (!teacher || !submission) {
+  if (!teacher || !isUserActive(teacher) || !submission) {
     res.status(404).json({ error: "Teacher or submission not found." });
     return;
   }
@@ -624,6 +640,42 @@ app.put("/api/submissions/:submissionId/grade", handleAsync(async (req, res) => 
   await writeDatabase(database);
 
   res.json({ message: "Homework ranking saved." });
+}));
+
+app.put("/api/admin/users/:userId/activation", handleAsync(async (req, res) => {
+  const { userId } = req.params;
+  const { adminId, isActive } = req.body || {};
+  const database = await readDatabase();
+  const admin = database.users.find((entry) => entry.id === adminId && entry.role === "admin");
+  const targetUser = database.users.find((entry) => entry.id === userId);
+
+  if (!admin || !isUserActive(admin)) {
+    res.status(403).json({ error: "Admin account not found." });
+    return;
+  }
+
+  if (!targetUser || !["teacher", "student"].includes(targetUser.role)) {
+    res.status(404).json({ error: "Teacher or student account not found." });
+    return;
+  }
+
+  if (targetUser.id === admin.id) {
+    res.status(400).json({ error: "Admin account cannot update itself here." });
+    return;
+  }
+
+  const shouldActivate = isActive === true || isActive === "true";
+  targetUser.isActive = shouldActivate;
+  targetUser.activationStatus = shouldActivate ? "active" : "inactive";
+  targetUser.updatedAt = new Date().toISOString();
+  await writeDatabase(database);
+
+  res.json({
+    user: sanitizeUser(targetUser),
+    message: shouldActivate
+      ? `${targetUser.name} is now active and can log in.`
+      : `${targetUser.name} has been deactivated.`
+  });
 }));
 
 app.use((error, _req, res, _next) => {
@@ -645,16 +697,39 @@ async function buildDashboard(userId) {
     throw new Error("User not found.");
   }
 
+  if (user.role !== "admin" && !isUserActive(user)) {
+    throw createAccessError("Your account is not active.");
+  }
+
   const students = database.users.filter((entry) => entry.role === "student");
   const classes = user.role === "teacher"
     ? database.classes.filter((entry) => entry.teacherId === user.id)
-    : database.classes.filter((entry) => Array.isArray(entry.studentIds) && entry.studentIds.includes(user.id));
+    : user.role === "student"
+      ? database.classes.filter((entry) => Array.isArray(entry.studentIds) && entry.studentIds.includes(user.id))
+      : [];
 
   const submissions = user.role === "teacher"
     ? database.submissions.filter((submission) =>
         classes.some((classItem) => classItem.id === submission.classId)
       )
-    : database.submissions.filter((submission) => submission.studentId === user.id);
+    : user.role === "student"
+      ? database.submissions.filter((submission) => submission.studentId === user.id)
+      : [];
+
+  const managedUsers = user.role === "admin"
+    ? database.users
+      .filter((entry) => ["teacher", "student"].includes(entry.role))
+      .sort((left, right) => {
+        const leftWeight = getActivationSortWeight(left);
+        const rightWeight = getActivationSortWeight(right);
+        if (leftWeight !== rightWeight) {
+          return leftWeight - rightWeight;
+        }
+
+        return String(left.name || "").localeCompare(String(right.name || ""));
+      })
+      .map(sanitizeUser)
+    : [];
 
   classes.sort((left, right) => new Date(left.dateTime) - new Date(right.dateTime));
   submissions.sort((left, right) => new Date(right.submittedAt) - new Date(left.submittedAt));
@@ -664,6 +739,7 @@ async function buildDashboard(userId) {
     students: (user.role === "teacher" ? students : students.filter((entry) => entry.id === user.id)).map(sanitizeUser),
     classes,
     submissions,
+    managedUsers,
     zoomConfigured: isZoomConfigured(),
     teamsSupported: true
   };
@@ -675,7 +751,10 @@ function sanitizeUser(user) {
     role: user.role,
     subject: user.subject || "",
     name: user.name,
-    email: user.email
+    email: user.email,
+    isActive: isUserActive(user),
+    activationStatus: getActivationStatus(user),
+    createdAt: user.createdAt || ""
   };
 }
 
@@ -728,9 +807,38 @@ function normalizeDatabase(database) {
     changed = true;
   }
 
+  if (ensureBootstrapAdmin(database)) {
+    changed = true;
+  }
+
+  for (const user of database.users) {
+    if (!user.createdAt) {
+      user.createdAt = new Date().toISOString();
+      changed = true;
+    }
+
+    const normalizedStatus = normalizeUserActivation(user);
+    if (user.isActive !== normalizedStatus.isActive) {
+      user.isActive = normalizedStatus.isActive;
+      changed = true;
+    }
+
+    if (user.activationStatus !== normalizedStatus.activationStatus) {
+      user.activationStatus = normalizedStatus.activationStatus;
+      changed = true;
+    }
+  }
+
   const validUserIds = new Set(database.users.map((entry) => entry.id));
   const classesBeforePurge = database.classes.length;
-  database.classes = database.classes.filter((entry) => validUserIds.has(entry.teacherId));
+  database.classes = database.classes.filter((entry) => {
+    if (!validUserIds.has(entry.teacherId)) {
+      return false;
+    }
+
+    const teacher = database.users.find((user) => user.id === entry.teacherId);
+    return teacher && teacher.role === "teacher";
+  });
   if (database.classes.length !== classesBeforePurge) {
     changed = true;
   }
@@ -814,8 +922,9 @@ function normalizeDatabase(database) {
 }
 
 function createSeedData() {
+  const bootstrapAdmin = createBootstrapAdmin();
   return {
-    users: [],
+    users: bootstrapAdmin ? [bootstrapAdmin] : [],
     classes: [],
     submissions: []
   };
@@ -1041,6 +1150,112 @@ function normalizeMeetingMode({ meetingProvider, meetingMode, useAutoZoom }) {
   return "manual";
 }
 
+function getActivationStatus(user) {
+  return normalizeUserActivation(user).activationStatus;
+}
+
+function isUserActive(user) {
+  return normalizeUserActivation(user).isActive;
+}
+
+function normalizeUserActivation(user) {
+  if (!user || user.role === "admin") {
+    return {
+      isActive: true,
+      activationStatus: "active"
+    };
+  }
+
+  const normalizedStatus = String(user.activationStatus || "").trim().toLowerCase();
+  if (normalizedStatus === "pending") {
+    return { isActive: false, activationStatus: "pending" };
+  }
+
+  if (normalizedStatus === "inactive") {
+    return { isActive: false, activationStatus: "inactive" };
+  }
+
+  if (normalizedStatus === "active") {
+    return { isActive: true, activationStatus: "active" };
+  }
+
+  if (typeof user.isActive === "boolean") {
+    return {
+      isActive: user.isActive,
+      activationStatus: user.isActive ? "active" : "pending"
+    };
+  }
+
+  return {
+    isActive: true,
+    activationStatus: "active"
+  };
+}
+
+function getActivationSortWeight(user) {
+  const status = getActivationStatus(user);
+  if (status === "pending") {
+    return 0;
+  }
+
+  if (status === "inactive") {
+    return 2;
+  }
+
+  return 1;
+}
+
+function createBootstrapAdmin() {
+  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+    return null;
+  }
+
+  return {
+    id: "admin-bootstrap",
+    role: "admin",
+    name: ADMIN_NAME,
+    email: ADMIN_EMAIL,
+    password: ADMIN_PASSWORD,
+    subject: "",
+    isActive: true,
+    activationStatus: "active",
+    createdAt: new Date().toISOString()
+  };
+}
+
+function ensureBootstrapAdmin(database) {
+  const bootstrapAdmin = createBootstrapAdmin();
+  if (!bootstrapAdmin) {
+    return false;
+  }
+
+  const existingAdmin = database.users.find(
+    (entry) => entry.role === "admin" && String(entry.email || "").toLowerCase() === bootstrapAdmin.email
+  );
+
+  if (existingAdmin) {
+    let changed = false;
+    if (existingAdmin.password !== bootstrapAdmin.password) {
+      existingAdmin.password = bootstrapAdmin.password;
+      changed = true;
+    }
+    if (existingAdmin.name !== bootstrapAdmin.name) {
+      existingAdmin.name = bootstrapAdmin.name;
+      changed = true;
+    }
+    if (!existingAdmin.createdAt) {
+      existingAdmin.createdAt = bootstrapAdmin.createdAt;
+      changed = true;
+    }
+    existingAdmin.isActive = true;
+    existingAdmin.activationStatus = "active";
+    return changed;
+  }
+
+  database.users.push(bootstrapAdmin);
+  return true;
+}
+
 function normalizeStoredMeetingProvider(classItem) {
   if (classItem.meetingProvider === "none") {
     return "none";
@@ -1134,12 +1349,22 @@ function resolveSelectedStudents(database, studentIds) {
     throw createValidationError("One or more selected kids could not be found.");
   }
 
+  if (students.some((student) => !isUserActive(student))) {
+    throw createValidationError("Selected kid accounts must be active before scheduling classes.");
+  }
+
   return students;
 }
 
 function createValidationError(message) {
   const error = new Error(message);
   error.statusCode = 400;
+  return error;
+}
+
+function createAccessError(message) {
+  const error = new Error(message);
+  error.statusCode = 403;
   return error;
 }
 

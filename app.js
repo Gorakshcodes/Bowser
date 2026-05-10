@@ -15,6 +15,7 @@
     classes: [],
     submissions: [],
     students: [],
+    managedUsers: [],
     zoomConfigured: false,
     teamsSupported: true,
     message: null,
@@ -69,9 +70,11 @@
       return;
     }
 
-    app.innerHTML = state.user.role === "teacher"
-      ? renderTeacherDashboard()
-      : renderStudentDashboard();
+    app.innerHTML = state.user.role === "admin"
+      ? renderAdminDashboard()
+      : state.user.role === "teacher"
+        ? renderTeacherDashboard()
+        : renderStudentDashboard();
   }
 
   function renderLogin() {
@@ -103,21 +106,29 @@
               <strong>Student</strong>
               <span>Classes, joins, homework</span>
             </button>
+            <button class="role-card ${state.authRole === "admin" ? "is-active" : ""}" type="button" data-action="set-auth-role" data-role="admin">
+              <strong>Admin</strong>
+              <span>Approve and manage accounts</span>
+            </button>
           </div>
         </div>
 
         <div class="surface auth-panel">
           <div class="auth-switch">
             <button class="btn ${state.authMode === "login" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="login">Login</button>
-            <button class="btn ${state.authMode === "register" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="register">Create Account</button>
+            ${state.authRole === "admin"
+              ? ""
+              : `<button class="btn ${state.authMode === "register" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="register">Create Account</button>`}
           </div>
           <h2 class="panel-title">${state.authMode === "register" ? `Create ${getAuthRoleLabel()} account` : `Login as ${getAuthRoleLabel()}`}</h2>
           <p class="panel-subtitle">
             ${state.authMode === "register"
               ? `Set up a ${state.authRole} account to enter the learning app.`
-              : `Use your ${state.authRole} email and password to continue.`}
+              : state.authRole === "admin"
+                ? "Use the admin email and password to approve teacher and student accounts."
+                : `Use your ${state.authRole} email and password to continue.`}
           </p>
-          ${state.authMode === "register" ? renderRegisterForm() : renderLoginForm()}
+          ${state.authMode === "register" && state.authRole !== "admin" ? renderRegisterForm() : renderLoginForm()}
           ${renderMessage()}
         </div>
       </section>
@@ -130,7 +141,7 @@
         <input name="role" type="hidden" value="${escapeAttribute(state.authRole)}">
         <div class="field">
           <label for="login-email">Email</label>
-          <input id="login-email" name="email" type="email" placeholder="${state.authRole === "teacher" ? "teacher@example.com" : "student@example.com"}" required>
+          <input id="login-email" name="email" type="email" placeholder="${getAuthEmailPlaceholder()}" required>
         </div>
         <div class="field">
           <label for="login-password">Password</label>
@@ -372,6 +383,67 @@
             </section>
           </div>
         `}
+        ${renderMessage()}
+      </section>
+    `;
+  }
+
+  function renderAdminDashboard() {
+    const pendingUsers = state.managedUsers.filter((user) => user.activationStatus === "pending");
+    const activeUsers = state.managedUsers.filter((user) => user.activationStatus === "active");
+    const inactiveUsers = state.managedUsers.filter((user) => user.activationStatus === "inactive");
+
+    return `
+      <section class="surface">
+        <div class="dashboard-header">
+          <div>
+            <span class="eyebrow">Admin Portal</span>
+            <h2 class="panel-title">${escapeHtml(state.user.name)}</h2>
+            <p class="panel-subtitle">Review new teacher and student accounts, then activate or deactivate access from one place.</p>
+          </div>
+          <div class="dashboard-actions">
+            <span class="mini-stat">${pendingUsers.length} pending</span>
+            <span class="mini-stat">${activeUsers.length} active</span>
+            <span class="mini-stat">${inactiveUsers.length} inactive</span>
+            <button class="btn ghost" type="button" data-action="logout">Logout</button>
+          </div>
+        </div>
+
+        <div class="summary-strip">
+          <article class="summary-card">
+            <span>Pending Approval</span>
+            <strong>${pendingUsers.length}</strong>
+            <small>Waiting for admin activation</small>
+          </article>
+          <article class="summary-card">
+            <span>Active Accounts</span>
+            <strong>${activeUsers.length}</strong>
+            <small>Can log in now</small>
+          </article>
+          <article class="summary-card">
+            <span>Inactive Accounts</span>
+            <strong>${inactiveUsers.length}</strong>
+            <small>Access paused</small>
+          </article>
+        </div>
+
+        <div class="dashboard-columns admin-columns">
+          <section class="card">
+            <h3>Pending Accounts</h3>
+            <p>New teacher and student accounts stay here until you activate them.</p>
+            <div class="section-stack">
+              ${pendingUsers.length ? pendingUsers.map(renderAdminUserCard).join("") : renderEmptyState("No pending accounts", "New signups will appear here for approval.")}
+            </div>
+          </section>
+
+          <section class="card">
+            <h3>Active and Inactive Accounts</h3>
+            <p>Deactivate access when needed, or reactivate an account later.</p>
+            <div class="section-stack">
+              ${[...activeUsers, ...inactiveUsers].length ? [...activeUsers, ...inactiveUsers].map(renderAdminUserCard).join("") : renderEmptyState("No managed accounts yet", "Teacher and student accounts will appear here after they sign up.")}
+            </div>
+          </section>
+        </div>
         ${renderMessage()}
       </section>
     `;
@@ -628,6 +700,48 @@
     `;
   }
 
+  function renderAdminUserCard(user) {
+    const statusLabel = getActivationStatusLabel(user.activationStatus);
+    const statusClass = user.activationStatus === "active"
+      ? "status-pill approved"
+      : user.activationStatus === "inactive"
+        ? "status-pill pending"
+        : "status-pill waiting";
+    const activationAction = user.activationStatus === "active"
+      ? {
+          label: "Deactivate",
+          active: "false",
+          style: "secondary"
+        }
+      : {
+          label: "Activate",
+          active: "true",
+          style: "primary"
+        };
+
+    return `
+      <article class="card admin-user-card">
+        <div class="card__top">
+          <div>
+            <h3>${escapeHtml(user.name)}</h3>
+            <p>${escapeHtml(formatAdminRoleLabel(user.role))}</p>
+          </div>
+          <span class="${statusClass}">${escapeHtml(statusLabel)}</span>
+        </div>
+        <div class="card__meta">
+          <span><strong>Email:</strong> ${escapeHtml(user.email)}</span>
+          ${user.subject ? `<span><strong>Subject:</strong> ${escapeHtml(user.subject)}</span>` : ""}
+          ${user.createdAt ? `<span><strong>Joined:</strong> ${escapeHtml(formatDate(user.createdAt))}</span>` : ""}
+        </div>
+        <div class="class-actions">
+          <button class="btn ${activationAction.style}" type="button" data-action="toggle-user-active" data-user-id="${escapeAttribute(user.id)}" data-next-active="${activationAction.active}">
+            ${activationAction.label}
+          </button>
+        </div>
+      </article>
+    `;
+  }
+
   function renderStudentSubmissionCard(submission) {
     const linkedClass = state.classes.find((classItem) => classItem.id === submission.classId);
     const statusClass = submission.score ? "status-pill" : "status-pill pending";
@@ -879,14 +993,17 @@
     }
 
     if (actionButton.dataset.action === "set-auth-mode") {
-      state.authMode = actionButton.dataset.mode === "register" ? "register" : "login";
+      state.authMode = actionButton.dataset.mode === "register" && state.authRole !== "admin" ? "register" : "login";
       renderApp();
       return;
     }
 
     if (actionButton.dataset.action === "set-auth-role") {
-      state.authRole = actionButton.dataset.role === "student" ? "student" : "teacher";
+      state.authRole = ["student", "teacher", "admin"].includes(actionButton.dataset.role) ? actionButton.dataset.role : "teacher";
       state.registerRole = state.authRole;
+      if (state.authRole === "admin") {
+        state.authMode = "login";
+      }
       renderApp();
       return;
     }
@@ -929,12 +1046,18 @@
       return;
     }
 
+    if (actionButton.dataset.action === "toggle-user-active") {
+      void updateUserActivation(actionButton.dataset.userId, actionButton.dataset.nextActive === "true");
+      return;
+    }
+
     if (actionButton.dataset.action === "logout") {
       clearSession();
       state.user = null;
       state.classes = [];
       state.submissions = [];
       state.students = [];
+      state.managedUsers = [];
       state.zoomConfigured = false;
       state.teamsSupported = true;
       state.authMode = "login";
@@ -1032,9 +1155,31 @@
         })
       });
 
-      applyDashboardPayload(payload.dashboard);
-      writeSession({ userId: payload.user.id });
-      renderApp({ type: "success", text: `Account created for ${payload.user.name}.` });
+      state.authMode = "login";
+      renderApp({
+        type: "success",
+        text: payload.message || "Account created successfully. Please wait for admin activation before logging in."
+      });
+    } catch (error) {
+      renderApp({ type: "error", text: error.message });
+    }
+  }
+
+  async function updateUserActivation(userId, isActive) {
+    try {
+      const response = await api(`/api/admin/users/${encodeURIComponent(userId)}/activation`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          adminId: state.user.id,
+          isActive
+        })
+      });
+
+      await refreshDashboard(state.user.id, {
+        type: "success",
+        text: response.message || "Account access updated."
+      });
     } catch (error) {
       renderApp({ type: "error", text: error.message });
     }
@@ -1234,10 +1379,11 @@
       const classesChanged = JSON.stringify(state.classes) !== JSON.stringify(payload.classes || []);
       const submissionsChanged = JSON.stringify(state.submissions) !== JSON.stringify(payload.submissions || []);
       const studentsChanged = JSON.stringify(state.students) !== JSON.stringify(payload.students || []);
+      const managedUsersChanged = JSON.stringify(state.managedUsers) !== JSON.stringify(payload.managedUsers || []);
 
       applyDashboardPayload(payload);
 
-      if (classesChanged || submissionsChanged || studentsChanged) {
+      if (classesChanged || submissionsChanged || studentsChanged || managedUsersChanged) {
         renderApp();
       }
     } catch (_error) {
@@ -1264,6 +1410,7 @@
     state.classes = payload.classes || [];
     state.submissions = payload.submissions || [];
     state.students = payload.students || [];
+    state.managedUsers = payload.managedUsers || [];
     state.zoomConfigured = Boolean(payload.zoomConfigured);
     state.teamsSupported = payload.teamsSupported !== false;
 
@@ -1276,7 +1423,7 @@
     }
 
     state.dashboardTab = ["meetings", "homework"].includes(state.dashboardTab) ? state.dashboardTab : "meetings";
-    state.authRole = state.user.role === "student" ? "student" : "teacher";
+    state.authRole = ["student", "teacher", "admin"].includes(state.user.role) ? state.user.role : "teacher";
 
     if (state.user.role === "teacher") {
       state.meetingProvider = ["none", "zoom", "teams"].includes(state.meetingProvider) ? state.meetingProvider : "none";
@@ -1288,10 +1435,14 @@
       if (state.selectedCalendarStudentId !== "all" && !validStudentIds.has(state.selectedCalendarStudentId)) {
         state.selectedCalendarStudentId = "all";
       }
-    } else {
+    } else if (state.user.role === "student") {
       state.selectedClassId = null;
       state.isEditingClass = false;
       state.selectedCalendarStudentId = state.user.id;
+    } else {
+      state.selectedClassId = null;
+      state.isEditingClass = false;
+      state.selectedCalendarStudentId = "all";
     }
   }
 
@@ -1393,7 +1544,51 @@
   }
 
   function getAuthRoleLabel() {
-    return state.authRole === "student" ? "student" : "teacher";
+    if (state.authRole === "student") {
+      return "student";
+    }
+
+    if (state.authRole === "admin") {
+      return "admin";
+    }
+
+    return "teacher";
+  }
+
+  function getAuthEmailPlaceholder() {
+    if (state.authRole === "student") {
+      return "student@example.com";
+    }
+
+    if (state.authRole === "admin") {
+      return "admin@example.com";
+    }
+
+    return "teacher@example.com";
+  }
+
+  function formatAdminRoleLabel(role) {
+    if (role === "teacher") {
+      return "Teacher";
+    }
+
+    if (role === "student") {
+      return "Student";
+    }
+
+    return "User";
+  }
+
+  function getActivationStatusLabel(status) {
+    if (status === "active") {
+      return "Active";
+    }
+
+    if (status === "inactive") {
+      return "Deactivated";
+    }
+
+    return "Pending Approval";
   }
 
   function getClassTitle(classItem) {

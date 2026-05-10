@@ -22,7 +22,9 @@ A small full-stack teacher-student portal for scheduling classes, sharing links,
 ## Accounts
 
 - The app now starts without demo users or demo classes.
+- Admin login is bootstrapped from `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `ADMIN_NAME`.
 - Create real teacher and student accounts from the login page.
+- New teacher and student accounts stay pending until an admin activates them.
 - Create student accounts for kids first, then teachers can assign classes to those saved kid accounts.
 
 ## Setup
@@ -47,7 +49,13 @@ The app uses:
 - local `data/portal-data.json` when `DATABASE_URL` is not set
 - Postgres when `DATABASE_URL` is set
 
-4. If you want automatic Zoom meeting creation, fill in:
+4. Add an admin account in `.env`:
+
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
+- `ADMIN_NAME`
+
+5. If you want automatic Zoom meeting creation, fill in:
 
 - `ZOOM_ACCOUNT_ID`
 - `ZOOM_CLIENT_ID`
@@ -72,5 +80,6 @@ Then open `http://localhost:3000`.
 - When Postgres is enabled, homework images are stored inline with the saved submission data instead of relying on local upload files.
 - Local development stores uploaded homework files in `uploads/`.
 - Only `JPG`, `PNG`, `WEBP`, `HEIC`, and `HEIF` homework images up to `8 MB` are accepted.
+- Teachers and students can only log in after an admin activates their account.
 - Zoom integration uses Server-to-Server OAuth and creates meetings from the backend.
 - Teachers can schedule a class with only `date/time` and selected `kid` accounts; topic, notes, Drive link, and meeting link are optional.

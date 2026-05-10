@@ -447,6 +447,10 @@ h1,
   margin-top: 18px;
 }
 
+.admin-columns {
+  align-items: start;
+}
+
 .section-heading,
 .form-actions,
 .panel-actions {
@@ -497,6 +501,11 @@ h1,
 
 .card--soft {
   background: var(--surface-soft);
+}
+
+.admin-user-card {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 249, 255, 0.96));
 }
 
 .empty-state {
@@ -636,6 +645,18 @@ h1,
   background: #fff7e6;
   color: var(--warning);
   border-color: #f0d8a3;
+}
+
+.status-pill.approved {
+  background: #eef6f1;
+  color: var(--success);
+  border-color: #cfe6d8;
+}
+
+.status-pill.waiting {
+  background: #eff2ff;
+  color: var(--accent-strong);
+  border-color: #d9defc;
 }
 
 .meeting-pill {
