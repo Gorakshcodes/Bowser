@@ -3,14 +3,29 @@ const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { Pool } = require("pg");
 
 loadEnvFile(path.join(__dirname, ".env"));
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const DATA_DIR = path.join(__dirname, "data");
+const IS_VERCEL = Boolean(process.env.VERCEL);
+const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || "";
+const STORAGE_MODE = DATABASE_URL ? "postgres" : (IS_VERCEL ? "runtime-file" : "file");
+const RUNTIME_ROOT = STORAGE_MODE === "file" ? __dirname : path.join("/tmp", "bowser-runtime");
+const DATA_DIR = path.join(RUNTIME_ROOT, "data");
 const DATA_FILE = path.join(DATA_DIR, "portal-data.json");
-const UPLOADS_DIR = path.join(__dirname, "uploads");
+const REPO_DATA_FILE = path.join(__dirname, "data", "portal-data.json");
+const UPLOADS_DIR = path.join(RUNTIME_ROOT, "uploads");
+const STORAGE_STATE_KEY = "default";
+const pool = STORAGE_MODE === "postgres"
+  ? new Pool({
+      connectionString: DATABASE_URL,
+      ssl: shouldUseDatabaseSsl()
+        ? { rejectUnauthorized: false }
+        : undefined
+    })
+  : null;
 const LEGACY_DEMO_USER_IDS = new Set([
   "teacher-maths",
   "teacher-english",
@@ -33,19 +48,22 @@ const ALLOWED_IMAGE_TYPES = {
   "image/heif": ".heif"
 };
 
-ensureDirectory(DATA_DIR);
-ensureDirectory(UPLOADS_DIR);
-ensureSeedData();
-ensureDataShape();
+let storageInitializationError = null;
+const storageReady = initializeStorage().catch((error) => {
+  storageInitializationError = error;
+  throw error;
+});
 
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, callback) => callback(null, UPLOADS_DIR),
-    filename: (_req, file, callback) => {
-      const extension = ALLOWED_IMAGE_TYPES[file.mimetype] || ".jpg";
-      callback(null, `${Date.now()}-${crypto.randomUUID()}${extension}`);
-    }
-  }),
+  storage: STORAGE_MODE === "postgres"
+    ? multer.memoryStorage()
+    : multer.diskStorage({
+        destination: (_req, _file, callback) => callback(null, UPLOADS_DIR),
+        filename: (_req, file, callback) => {
+          const extension = ALLOWED_IMAGE_TYPES[file.mimetype] || ".jpg";
+          callback(null, `${Date.now()}-${crypto.randomUUID()}${extension}`);
+        }
+      }),
   fileFilter: (_req, file, callback) => {
     if (!ALLOWED_IMAGE_TYPES[file.mimetype]) {
       callback(new Error("Only JPG, PNG, WEBP, HEIC, or HEIF homework images are allowed."));
@@ -75,9 +93,15 @@ const handleHomeworkUpload = (req, res, next) => {
   });
 };
 
+const handleAsync = (handler) => (req, res, next) => {
+  Promise.resolve(handler(req, res, next)).catch(next);
+};
+
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use("/uploads", express.static(UPLOADS_DIR));
+if (STORAGE_MODE !== "postgres") {
+  app.use("/uploads", express.static(UPLOADS_DIR));
+}
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
@@ -90,39 +114,53 @@ app.get("/styles.css", (_req, res) => {
   res.sendFile(path.join(__dirname, "styles.css"));
 });
 
-app.get("/api/health", (_req, res) => {
-  res.json({
-    ok: true,
-    zoomConfigured: isZoomConfigured(),
-    teamsSupported: true
-  });
-});
+app.get("/api/health", handleAsync(async (_req, res) => {
+  try {
+    await ensureStorageReady();
+    res.json({
+      ok: true,
+      zoomConfigured: isZoomConfigured(),
+      teamsSupported: true,
+      storageMode: STORAGE_MODE
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      storageMode: STORAGE_MODE
+    });
+  }
+}));
 
-app.post("/api/login", (req, res) => {
+app.post("/api/login", handleAsync(async (req, res) => {
   const { email, password, role } = req.body || {};
   const normalizedRole = String(role || "").trim().toLowerCase();
-  const database = readDatabase();
-  const matchingUsers = database.users.filter(
-    (entry) =>
-      entry.email.toLowerCase() === String(email || "").trim().toLowerCase() &&
-      entry.password === String(password || "").trim()
-  );
-  const user = ["teacher", "student"].includes(normalizedRole)
-    ? matchingUsers.find((entry) => entry.role === normalizedRole)
-    : matchingUsers[0];
+  try {
+    const database = await readDatabase();
+    const matchingUsers = database.users.filter(
+      (entry) =>
+        entry.email.toLowerCase() === String(email || "").trim().toLowerCase() &&
+        entry.password === String(password || "").trim()
+    );
+    const user = ["teacher", "student"].includes(normalizedRole)
+      ? matchingUsers.find((entry) => entry.role === normalizedRole)
+      : matchingUsers[0];
 
-  if (!user) {
-    res.status(401).json({ error: "Invalid email or password." });
-    return;
+    if (!user) {
+      res.status(401).json({ error: "Invalid email or password." });
+      return;
+    }
+
+    res.json({
+      user: sanitizeUser(user),
+      dashboard: await buildDashboard(user.id)
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Could not complete login." });
   }
+}));
 
-  res.json({
-    user: sanitizeUser(user),
-    dashboard: buildDashboard(user.id)
-  });
-});
-
-app.post("/api/register", (req, res) => {
+app.post("/api/register", handleAsync(async (req, res) => {
   const { role, name, email, password, subject } = req.body || {};
   const normalizedRole = String(role || "").trim().toLowerCase();
   const normalizedName = String(name || "").trim();
@@ -150,44 +188,48 @@ app.post("/api/register", (req, res) => {
     return;
   }
 
-  const database = readDatabase();
-  if (database.users.some((entry) => entry.role === normalizedRole && entry.email.toLowerCase() === normalizedEmail)) {
-    res.status(409).json({ error: `A ${normalizedRole} account with this email already exists.` });
-    return;
+  try {
+    const database = await readDatabase();
+    if (database.users.some((entry) => entry.role === normalizedRole && entry.email.toLowerCase() === normalizedEmail)) {
+      res.status(409).json({ error: `A ${normalizedRole} account with this email already exists.` });
+      return;
+    }
+
+    const user = {
+      id: `${normalizedRole}-${crypto.randomUUID()}`,
+      role: normalizedRole,
+      name: normalizedName,
+      email: normalizedEmail,
+      password: normalizedPassword
+    };
+
+    if (normalizedRole === "teacher") {
+      user.subject = normalizedSubject || "General";
+    }
+
+    database.users.push(user);
+    await writeDatabase(database);
+
+    res.status(201).json({
+      user: sanitizeUser(user),
+      dashboard: await buildDashboard(user.id)
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Could not create the account." });
   }
+}));
 
-  const user = {
-    id: `${normalizedRole}-${crypto.randomUUID()}`,
-    role: normalizedRole,
-    name: normalizedName,
-    email: normalizedEmail,
-    password: normalizedPassword
-  };
-
-  if (normalizedRole === "teacher") {
-    user.subject = normalizedSubject || "General";
-  }
-
-  database.users.push(user);
-  writeDatabase(database);
-
-  res.status(201).json({
-    user: sanitizeUser(user),
-    dashboard: buildDashboard(user.id)
-  });
-});
-
-app.get("/api/dashboard", (req, res) => {
+app.get("/api/dashboard", handleAsync(async (req, res) => {
   const userId = String(req.query.userId || "");
   try {
-    const dashboard = buildDashboard(userId);
+    const dashboard = await buildDashboard(userId);
     res.json(dashboard);
   } catch (error) {
-    res.status(404).json({ error: error.message });
+    res.status(error.message === "User not found." ? 404 : 500).json({ error: error.message });
   }
-});
+}));
 
-app.post("/api/classes", async (req, res) => {
+app.post("/api/classes", handleAsync(async (req, res) => {
   const {
     teacherId,
     topic,
@@ -203,7 +245,7 @@ app.post("/api/classes", async (req, res) => {
     manualZoomLink
   } = req.body || {};
 
-  const database = readDatabase();
+  const database = await readDatabase();
   const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
 
   if (!teacher) {
@@ -286,7 +328,7 @@ app.post("/api/classes", async (req, res) => {
     };
 
     database.classes.push(classItem);
-    writeDatabase(database);
+    await writeDatabase(database);
     res.status(201).json({
       classItem,
       message: normalizedMeetingProvider === "zoom" && zoomMetadata
@@ -301,9 +343,9 @@ app.post("/api/classes", async (req, res) => {
       : (error.statusCode || 502);
     res.status(status).json({ error: error.message });
   }
-});
+}));
 
-app.put("/api/classes/:classId", async (req, res) => {
+app.put("/api/classes/:classId", handleAsync(async (req, res) => {
   const { classId } = req.params;
   const {
     teacherId,
@@ -320,7 +362,7 @@ app.put("/api/classes/:classId", async (req, res) => {
     manualZoomLink
   } = req.body || {};
 
-  const database = readDatabase();
+  const database = await readDatabase();
   const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
   const classItem = database.classes.find((entry) => entry.id === classId);
 
@@ -407,7 +449,7 @@ app.put("/api/classes/:classId", async (req, res) => {
     classItem.zoomMeetingId = zoomMetadata ? zoomMetadata.meetingId : "";
     classItem.zoomStartUrl = zoomMetadata ? zoomMetadata.startUrl : "";
 
-    writeDatabase(database);
+    await writeDatabase(database);
     res.json({
       classItem,
       message: zoomMetadata
@@ -420,9 +462,9 @@ app.put("/api/classes/:classId", async (req, res) => {
       : (error.statusCode || 502);
     res.status(status).json({ error: error.message });
   }
-});
+}));
 
-app.post("/api/submissions", handleHomeworkUpload, (req, res) => {
+app.post("/api/submissions", handleHomeworkUpload, handleAsync(async (req, res) => {
   const { classId, studentId } = req.body || {};
   const file = req.file;
 
@@ -431,7 +473,7 @@ app.post("/api/submissions", handleHomeworkUpload, (req, res) => {
     return;
   }
 
-  const database = readDatabase();
+  const database = await readDatabase();
   const student = database.users.find((entry) => entry.id === studentId && entry.role === "student");
   const classItem = database.classes.find((entry) => entry.id === classId);
 
@@ -455,15 +497,15 @@ app.post("/api/submissions", handleHomeworkUpload, (req, res) => {
     cleanupFile(existingSubmission.filePath);
   }
 
-  const storedUrl = `/uploads/${path.basename(file.path)}`;
+  const storedHomework = buildStoredHomeworkAsset(file);
   const submissionPayload = {
     id: existingSubmission ? existingSubmission.id : `submission-${crypto.randomUUID()}`,
     classId,
     studentId,
     studentName: student.name,
     subject: classItem.subject,
-    imageUrl: storedUrl,
-    filePath: file.path,
+    imageUrl: storedHomework.imageUrl,
+    filePath: storedHomework.filePath,
     submittedAt: new Date().toISOString(),
     score: existingSubmission ? "" : "",
     feedback: existingSubmission ? "" : ""
@@ -475,11 +517,11 @@ app.post("/api/submissions", handleHomeworkUpload, (req, res) => {
     database.submissions.push(submissionPayload);
   }
 
-  writeDatabase(database);
+  await writeDatabase(database);
   res.status(201).json({ message: "Homework uploaded successfully." });
-});
+}));
 
-app.put("/api/classes/:classId/meeting", async (req, res) => {
+app.put("/api/classes/:classId/meeting", handleAsync(async (req, res) => {
   const { classId } = req.params;
   const {
     teacherId,
@@ -490,7 +532,7 @@ app.put("/api/classes/:classId/meeting", async (req, res) => {
     manualZoomLink
   } = req.body || {};
 
-  const database = readDatabase();
+  const database = await readDatabase();
   const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
   const classItem = database.classes.find((entry) => entry.id === classId);
 
@@ -541,7 +583,7 @@ app.put("/api/classes/:classId/meeting", async (req, res) => {
     classItem.zoomLink = normalizedMeetingProvider === "zoom" ? meetingLink : "";
     classItem.zoomMeetingId = zoomMetadata ? zoomMetadata.meetingId : "";
     classItem.zoomStartUrl = zoomMetadata ? zoomMetadata.startUrl : "";
-    writeDatabase(database);
+    await writeDatabase(database);
 
     res.json({
       classItem,
@@ -557,12 +599,12 @@ app.put("/api/classes/:classId/meeting", async (req, res) => {
       : (error.statusCode || 502);
     res.status(status).json({ error: error.message });
   }
-});
+}));
 
-app.put("/api/submissions/:submissionId/grade", (req, res) => {
+app.put("/api/submissions/:submissionId/grade", handleAsync(async (req, res) => {
   const { submissionId } = req.params;
   const { teacherId, score, feedback } = req.body || {};
-  const database = readDatabase();
+  const database = await readDatabase();
   const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
   const submission = database.submissions.find((entry) => entry.id === submissionId);
 
@@ -579,9 +621,15 @@ app.put("/api/submissions/:submissionId/grade", (req, res) => {
 
   submission.score = String(score || "").trim();
   submission.feedback = String(feedback || "").trim();
-  writeDatabase(database);
+  await writeDatabase(database);
 
   res.json({ message: "Homework ranking saved." });
+}));
+
+app.use((error, _req, res, _next) => {
+  res.status(error.statusCode || 500).json({
+    error: error.message || "Something went wrong."
+  });
 });
 
 if (require.main === module) {
@@ -590,8 +638,8 @@ if (require.main === module) {
   });
 }
 
-function buildDashboard(userId) {
-  const database = readDatabase();
+async function buildDashboard(userId) {
+  const database = await readDatabase();
   const user = database.users.find((entry) => entry.id === userId);
   if (!user) {
     throw new Error("User not found.");
@@ -631,12 +679,24 @@ function sanitizeUser(user) {
   };
 }
 
-function readDatabase() {
-  return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+async function readDatabase() {
+  await ensureStorageReady();
+  if (STORAGE_MODE === "postgres") {
+    const payload = await readDatabaseFromPostgres();
+    return payload || createSeedData();
+  }
+
+  return readDatabaseFromFile();
 }
 
-function writeDatabase(payload) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(payload, null, 2));
+async function writeDatabase(payload) {
+  await ensureStorageReady();
+  if (STORAGE_MODE === "postgres") {
+    await writeDatabaseToPostgres(payload);
+    return;
+  }
+
+  writeDatabaseToFile(payload);
 }
 
 function ensureSeedData() {
@@ -644,11 +704,21 @@ function ensureSeedData() {
     return;
   }
 
-  writeDatabase(createSeedData());
+  writeDatabaseToFile(loadSeedDatabase());
 }
 
 function ensureDataShape() {
-  const database = readDatabase();
+  const database = readDatabaseFromFile();
+  const { changed } = normalizeDatabase(database);
+  if (changed) {
+    writeDatabaseToFile(database);
+  }
+}
+
+function normalizeDatabase(database) {
+  database.users = Array.isArray(database.users) ? database.users : [];
+  database.classes = Array.isArray(database.classes) ? database.classes : [];
+  database.submissions = Array.isArray(database.submissions) ? database.submissions : [];
   let changed = false;
   const usersBeforePurge = database.users.length;
   database.users = database.users.filter(
@@ -740,9 +810,7 @@ function ensureDataShape() {
     changed = true;
   }
 
-  if (changed) {
-    writeDatabase(database);
-  }
+  return { database, changed };
 }
 
 function createSeedData() {
@@ -769,6 +837,105 @@ function cleanupFile(filePath) {
   } catch (_error) {
     // Ignore cleanup failures for demo simplicity.
   }
+}
+
+function buildStoredHomeworkAsset(file) {
+  if (STORAGE_MODE === "postgres") {
+    return {
+      imageUrl: `data:${file.mimetype};base64,${file.buffer.toString("base64")}`,
+      filePath: ""
+    };
+  }
+
+  return {
+    imageUrl: `/uploads/${path.basename(file.path)}`,
+    filePath: file.path
+  };
+}
+
+function readDatabaseFromFile() {
+  return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+}
+
+function writeDatabaseToFile(payload) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(payload, null, 2));
+}
+
+async function readDatabaseFromPostgres() {
+  const result = await pool.query(
+    "SELECT payload FROM bowser_portal_state WHERE state_key = $1",
+    [STORAGE_STATE_KEY]
+  );
+  if (!result.rows[0]) {
+    return null;
+  }
+
+  return result.rows[0].payload || null;
+}
+
+async function writeDatabaseToPostgres(payload) {
+  await pool.query(
+    `INSERT INTO bowser_portal_state (state_key, payload, updated_at)
+     VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (state_key)
+     DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+    [STORAGE_STATE_KEY, JSON.stringify(payload)]
+  );
+}
+
+function loadSeedDatabase() {
+  if (fs.existsSync(REPO_DATA_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(REPO_DATA_FILE, "utf8"));
+    } catch (_error) {
+      return createSeedData();
+    }
+  }
+
+  return createSeedData();
+}
+
+async function initializeStorage() {
+  if (STORAGE_MODE === "postgres") {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bowser_portal_state (
+        state_key TEXT PRIMARY KEY,
+        payload JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    const existingDatabase = await readDatabaseFromPostgres();
+    if (!existingDatabase) {
+      const seededDatabase = loadSeedDatabase();
+      normalizeDatabase(seededDatabase);
+      await writeDatabaseToPostgres(seededDatabase);
+      return;
+    }
+
+    const { changed } = normalizeDatabase(existingDatabase);
+    if (changed) {
+      await writeDatabaseToPostgres(existingDatabase);
+    }
+    return;
+  }
+
+  ensureDirectory(DATA_DIR);
+  ensureDirectory(UPLOADS_DIR);
+  ensureSeedData();
+  ensureDataShape();
+}
+
+async function ensureStorageReady() {
+  if (storageInitializationError) {
+    throw storageInitializationError;
+  }
+
+  return storageReady;
+}
+
+function shouldUseDatabaseSsl() {
+  return process.env.DATABASE_SSL !== "false";
 }
 
 function loadEnvFile(envPath) {

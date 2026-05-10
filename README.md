@@ -1,6 +1,6 @@
 # Bowser Learning Portal
 
-A small full-stack teacher-student portal with Zoom and Teams meeting support.
+A small full-stack teacher-student portal for scheduling classes, sharing links, and reviewing homework.
 
 ## Features
 
@@ -8,7 +8,6 @@ A small full-stack teacher-student portal with Zoom and Teams meeting support.
 - Schedule classes from the portal
 - Create Zoom meeting links automatically when Zoom credentials are configured
 - Manual Zoom link fallback when Zoom is not configured yet
-- Manual Microsoft Teams link support for scheduled classes
 - Share lesson details and Google Drive document links
 - Assign classes to one or more kids
 - Student access to their own assigned class links and shared documents
@@ -17,7 +16,8 @@ A small full-stack teacher-student portal with Zoom and Teams meeting support.
 - Teacher review, ranking, and feedback for homework
 - Week and month calendar views for both teachers and students
 - Kid-name calendar filtering for teachers
-- Persistent JSON-backed storage for classes and submissions
+- Local JSON storage for development
+- Postgres-backed storage for Vercel and production deployments
 
 ## Accounts
 
@@ -37,7 +37,17 @@ npm install
 
 Node 18+ is recommended because the backend uses the built-in `fetch` API for Zoom.
 
-3. If you want automatic Zoom meeting creation, fill in:
+3. For production or Vercel, add a Postgres connection string:
+
+- `DATABASE_URL`
+
+If your provider needs SSL, leave `DATABASE_SSL=true`.
+
+The app uses:
+- local `data/portal-data.json` when `DATABASE_URL` is not set
+- Postgres when `DATABASE_URL` is set
+
+4. If you want automatic Zoom meeting creation, fill in:
 
 - `ZOOM_ACCOUNT_ID`
 - `ZOOM_CLIENT_ID`
@@ -45,7 +55,6 @@ Node 18+ is recommended because the backend uses the built-in `fetch` API for Zo
 - `ZOOM_USER_ID`
 
 If those values are missing, the portal still works and teachers can paste a manual Zoom link instead.
-Teams links are currently manual only, so no extra Teams credentials are required.
 
 ## Run
 
@@ -58,9 +67,10 @@ Then open `http://localhost:3000`.
 ## Notes
 
 - Static files are served by `server.js`.
-- Data is stored in `data/portal-data.json`.
-- Homework uploads are stored in `uploads/`.
+- Local development stores data in `data/portal-data.json`.
+- Vercel and production deployments should use `DATABASE_URL`.
+- When Postgres is enabled, homework images are stored inline with the saved submission data instead of relying on local upload files.
+- Local development stores uploaded homework files in `uploads/`.
 - Only `JPG`, `PNG`, `WEBP`, `HEIC`, and `HEIF` homework images up to `8 MB` are accepted.
 - Zoom integration uses Server-to-Server OAuth and creates meetings from the backend.
-- Teams support uses manual `teams.microsoft.com` or `teams.live.com` join links.
 - Teachers can schedule a class with only `date/time` and selected `kid` accounts; topic, notes, Drive link, and meeting link are optional.
