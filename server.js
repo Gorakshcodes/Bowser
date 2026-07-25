@@ -53,11 +53,13 @@ const ALLOWED_IMAGE_TYPES = {
 const MEETING_PROVIDERS = {
   zoom: {
     label: "Zoom",
-    hosts: ["zoom.us"]
+    hosts: ["zoom.us"],
+    supportsAuto: true
   },
   meet: {
     label: "Google Meet",
-    hosts: ["meet.google.com"]
+    hosts: ["meet.google.com"],
+    supportsAuto: true
   },
   teams: {
     label: "Teams",
@@ -66,9 +68,12 @@ const MEETING_PROVIDERS = {
       "teams.live.com",
       "teams.microsoft.us",
       "teams.microsoft.de"
-    ]
+    ],
+    supportsAuto: false
   }
 };
+const MEETING_TIMEZONE = process.env.MEETING_TIMEZONE || "Asia/Riyadh";
+const NOT_CONFIGURED_ERROR_CODES = new Set(["ZOOM_NOT_CONFIGURED", "GOOGLE_MEET_NOT_CONFIGURED"]);
 const SESSION_COOKIE_NAME = "bowser_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_SECRET_ENV = String(process.env.SESSION_SECRET || "").trim();
@@ -149,6 +154,7 @@ app.get("/api/health", handleAsync(async (_req, res) => {
     res.json({
       ok: true,
       zoomConfigured: isZoomConfigured(),
+      googleMeetConfigured: isGoogleMeetConfigured(),
       teamsSupported: true,
       storageMode: STORAGE_MODE
     });
@@ -337,17 +343,17 @@ app.post("/api/classes", requireAuth("teacher"), handleAsync(async (req, res) =>
     const rawManualMeetingLink = String(manualMeetingLink || manualZoomLink || "").trim();
 
     let meetingLink = "";
-    let zoomMetadata = null;
+    let autoMeeting = null;
 
-    if (normalizedMeetingProvider === "zoom" && normalizedMeetingMode === "auto") {
-      zoomMetadata = await createZoomMeeting({
+    if (normalizedMeetingMode === "auto") {
+      autoMeeting = await createAutoMeeting(normalizedMeetingProvider, {
         teacher,
         topic: String(topic || "").trim() || `Class with ${selectedStudents.map((student) => student.name).join(", ")}`,
         agenda: String(details || "").trim(),
         startTime: scheduledDate.toISOString(),
         durationMinutes: normalizedDuration
       });
-      meetingLink = zoomMetadata.joinUrl;
+      meetingLink = autoMeeting.joinUrl;
     } else if (normalizedMeetingProvider !== "none" && rawManualMeetingLink) {
       const normalizedLink = normalizeMeetingLink(rawManualMeetingLink, normalizedMeetingProvider);
       meetingLink = normalizeExternalUrl(normalizedLink, {
@@ -372,8 +378,9 @@ app.post("/api/classes", requireAuth("teacher"), handleAsync(async (req, res) =>
       meetingLink,
       zoomLink: normalizedMeetingProvider === "zoom" ? meetingLink : "",
       driveLink: normalizedDriveLink,
-      zoomMeetingId: zoomMetadata ? zoomMetadata.meetingId : "",
-      zoomStartUrl: zoomMetadata ? zoomMetadata.startUrl : "",
+      autoMeetingId: autoMeeting ? autoMeeting.meetingId : "",
+      zoomMeetingId: autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.meetingId : "",
+      zoomStartUrl: autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.startUrl : "",
       createdAt: new Date().toISOString()
     };
 
@@ -381,14 +388,14 @@ app.post("/api/classes", requireAuth("teacher"), handleAsync(async (req, res) =>
     await writeDatabase(database);
     res.status(201).json({
       classItem,
-      message: normalizedMeetingProvider === "zoom" && zoomMetadata
-        ? "Zoom class link created and shared with students."
+      message: autoMeeting
+        ? `${getMeetingProviderLabel(normalizedMeetingProvider)} class link created and shared with students.`
         : meetingLink
           ? `${getMeetingProviderLabel(normalizedMeetingProvider)} class link saved and shared with students.`
           : "Class scheduled successfully. You can add a class link later if needed."
     });
   } catch (error) {
-    const status = error.code === "ZOOM_NOT_CONFIGURED"
+    const status = NOT_CONFIGURED_ERROR_CODES.has(error.code)
       ? 400
       : (error.statusCode || 502);
     res.status(status).json({ error: error.message });
@@ -459,17 +466,17 @@ app.put("/api/classes/:classId", requireAuth("teacher"), handleAsync(async (req,
     const rawManualMeetingLink = String(manualMeetingLink || manualZoomLink || "").trim();
 
     let meetingLink = classItem.meetingLink || classItem.zoomLink || "";
-    let zoomMetadata = null;
+    let autoMeeting = null;
 
-    if (normalizedMeetingProvider === "zoom" && normalizedMeetingMode === "auto") {
-      zoomMetadata = await createZoomMeeting({
+    if (normalizedMeetingMode === "auto") {
+      autoMeeting = await createAutoMeeting(normalizedMeetingProvider, {
         teacher,
         topic: String(topic || "").trim() || `Class with ${selectedStudents.map((student) => student.name).join(", ")}`,
         agenda: String(details || "").trim(),
         startTime: scheduledDate.toISOString(),
         durationMinutes: normalizedDuration
       });
-      meetingLink = zoomMetadata.joinUrl;
+      meetingLink = autoMeeting.joinUrl;
     } else if (normalizedMeetingProvider !== "none" && rawManualMeetingLink) {
       const normalizedLink = normalizeMeetingLink(rawManualMeetingLink, normalizedMeetingProvider);
       meetingLink = normalizeExternalUrl(normalizedLink, {
@@ -480,8 +487,6 @@ app.put("/api/classes/:classId", requireAuth("teacher"), handleAsync(async (req,
       meetingLink = "";
     } else {
       meetingLink = "";
-      classItem.zoomMeetingId = "";
-      classItem.zoomStartUrl = "";
     }
 
     classItem.topic = String(topic || "").trim() || `Class with ${selectedStudents.map((student) => student.name).join(", ")}`;
@@ -495,18 +500,19 @@ app.put("/api/classes/:classId", requireAuth("teacher"), handleAsync(async (req,
     classItem.meetingMode = normalizedMeetingMode;
     classItem.meetingLink = meetingLink;
     classItem.zoomLink = normalizedMeetingProvider === "zoom" ? meetingLink : "";
-    classItem.zoomMeetingId = zoomMetadata ? zoomMetadata.meetingId : "";
-    classItem.zoomStartUrl = zoomMetadata ? zoomMetadata.startUrl : "";
+    classItem.autoMeetingId = autoMeeting ? autoMeeting.meetingId : "";
+    classItem.zoomMeetingId = autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.meetingId : "";
+    classItem.zoomStartUrl = autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.startUrl : "";
 
     await writeDatabase(database);
     res.json({
       classItem,
-      message: zoomMetadata
-        ? "Class updated and new Zoom class link created."
+      message: autoMeeting
+        ? `Class updated and new ${getMeetingProviderLabel(normalizedMeetingProvider)} class link created.`
         : "Class updated successfully."
     });
   } catch (error) {
-    const status = error.code === "ZOOM_NOT_CONFIGURED"
+    const status = NOT_CONFIGURED_ERROR_CODES.has(error.code)
       ? 400
       : (error.statusCode || 502);
     res.status(status).json({ error: error.message });
@@ -605,17 +611,17 @@ app.put("/api/classes/:classId/meeting", requireAuth("teacher"), handleAsync(asy
     const rawManualMeetingLink = String(manualMeetingLink || manualZoomLink || "").trim();
 
     let meetingLink = "";
-    let zoomMetadata = null;
+    let autoMeeting = null;
 
-    if (normalizedMeetingProvider === "zoom" && normalizedMeetingMode === "auto") {
-      zoomMetadata = await createZoomMeeting({
+    if (normalizedMeetingMode === "auto") {
+      autoMeeting = await createAutoMeeting(normalizedMeetingProvider, {
         teacher,
         topic: classItem.topic,
         agenda: classItem.details,
         startTime: new Date(classItem.dateTime).toISOString(),
         durationMinutes: classItem.durationMinutes
       });
-      meetingLink = zoomMetadata.joinUrl;
+      meetingLink = autoMeeting.joinUrl;
     } else if (normalizedMeetingProvider !== "none" && rawManualMeetingLink) {
       const normalizedLink = normalizeMeetingLink(rawManualMeetingLink, normalizedMeetingProvider);
       meetingLink = normalizeExternalUrl(normalizedLink, {
@@ -630,20 +636,21 @@ app.put("/api/classes/:classId/meeting", requireAuth("teacher"), handleAsync(asy
     classItem.meetingMode = normalizedMeetingMode;
     classItem.meetingLink = meetingLink;
     classItem.zoomLink = normalizedMeetingProvider === "zoom" ? meetingLink : "";
-    classItem.zoomMeetingId = zoomMetadata ? zoomMetadata.meetingId : "";
-    classItem.zoomStartUrl = zoomMetadata ? zoomMetadata.startUrl : "";
+    classItem.autoMeetingId = autoMeeting ? autoMeeting.meetingId : "";
+    classItem.zoomMeetingId = autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.meetingId : "";
+    classItem.zoomStartUrl = autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.startUrl : "";
     await writeDatabase(database);
 
     res.json({
       classItem,
       message: normalizedMeetingProvider === "none"
         ? "Class link cleared."
-        : zoomMetadata
-          ? "Zoom class link created and shared with students."
+        : autoMeeting
+          ? `${getMeetingProviderLabel(normalizedMeetingProvider)} class link created and shared with students.`
           : `${getMeetingProviderLabel(normalizedMeetingProvider)} class link saved and shared with students.`
     });
   } catch (error) {
-    const status = error.code === "ZOOM_NOT_CONFIGURED"
+    const status = NOT_CONFIGURED_ERROR_CODES.has(error.code)
       ? 400
       : (error.statusCode || 502);
     res.status(status).json({ error: error.message });
@@ -759,6 +766,7 @@ function buildDashboard(user, database) {
     submissions,
     managedUsers,
     zoomConfigured: isZoomConfigured(),
+    googleMeetConfigured: isGoogleMeetConfigured(),
     teamsSupported: true
   };
 }
@@ -1368,7 +1376,7 @@ function normalizeMeetingMode({ meetingProvider, meetingMode, useAutoZoom }) {
     return "none";
   }
 
-  if (meetingProvider !== "zoom") {
+  if (!supportsAutoMeeting(meetingProvider)) {
     return "manual";
   }
 
@@ -1524,11 +1532,11 @@ function normalizeStoredMeetingMode(classItem, meetingProvider) {
     return "none";
   }
 
-  if (meetingProvider !== "zoom") {
+  if (!supportsAutoMeeting(meetingProvider)) {
     return "manual";
   }
 
-  return classItem.zoomMeetingId ? "auto" : "manual";
+  return (classItem.autoMeetingId || classItem.zoomMeetingId) ? "auto" : "manual";
 }
 
 function getMeetingHosts(meetingProvider) {
@@ -1596,6 +1604,136 @@ function createValidationError(message) {
   return error;
 }
 
+function supportsAutoMeeting(meetingProvider) {
+  const provider = MEETING_PROVIDERS[meetingProvider];
+  return Boolean(provider && provider.supportsAuto);
+}
+
+async function createAutoMeeting(meetingProvider, options) {
+  if (meetingProvider === "meet") {
+    return createGoogleMeetMeeting(options);
+  }
+
+  return createZoomMeeting(options);
+}
+
+function isGoogleMeetConfigured() {
+  return Boolean(
+    process.env.GOOGLE_CLIENT_ID &&
+    process.env.GOOGLE_CLIENT_SECRET &&
+    process.env.GOOGLE_REFRESH_TOKEN
+  );
+}
+
+async function createGoogleMeetMeeting({ topic, agenda, startTime, durationMinutes }) {
+  if (!isGoogleMeetConfigured()) {
+    const error = new Error("Google Meet is not configured yet. Add credentials in .env or paste a manual Google Meet link.");
+    error.code = "GOOGLE_MEET_NOT_CONFIGURED";
+    throw error;
+  }
+
+  const accessToken = await createGoogleAccessToken();
+  const calendarId = process.env.GOOGLE_CALENDAR_ID || "primary";
+  const start = new Date(startTime);
+  const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
+
+  const eventResponse = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?conferenceDataVersion=1`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        summary: topic,
+        description: agenda,
+        start: {
+          dateTime: start.toISOString(),
+          timeZone: MEETING_TIMEZONE
+        },
+        end: {
+          dateTime: end.toISOString(),
+          timeZone: MEETING_TIMEZONE
+        },
+        conferenceData: {
+          createRequest: {
+            requestId: crypto.randomUUID(),
+            conferenceSolutionKey: { type: "hangoutsMeet" }
+          }
+        }
+      })
+    }
+  );
+
+  if (!eventResponse.ok) {
+    const details = await readApiError(eventResponse);
+    const error = new Error(`Google Meet could not create the meeting: ${details}. Verify GOOGLE_CALENDAR_ID and that the OAuth client has the https://www.googleapis.com/auth/calendar.events scope.`);
+    error.statusCode = 502;
+    throw error;
+  }
+
+  const event = await eventResponse.json();
+  const joinUrl = readGoogleMeetLink(event);
+
+  if (!joinUrl) {
+    const error = new Error("Google created the calendar event but returned no Meet link. Check that Meet conferencing is enabled for that Google account.");
+    error.statusCode = 502;
+    throw error;
+  }
+
+  return {
+    meetingId: String((event.conferenceData && event.conferenceData.conferenceId) || event.id || ""),
+    joinUrl,
+    startUrl: ""
+  };
+}
+
+async function createGoogleAccessToken() {
+  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
+      grant_type: "refresh_token"
+    }).toString()
+  });
+
+  if (!tokenResponse.ok) {
+    const details = await readApiError(tokenResponse);
+    const error = new Error(`Google auth failed: ${details}. Re-check GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN in .env.`);
+    error.statusCode = 502;
+    throw error;
+  }
+
+  const tokenPayload = await tokenResponse.json();
+  if (!tokenPayload.access_token) {
+    const error = new Error("Google auth returned no access token. Re-check that GOOGLE_REFRESH_TOKEN is still valid.");
+    error.statusCode = 502;
+    throw error;
+  }
+
+  return tokenPayload.access_token;
+}
+
+function readGoogleMeetLink(event) {
+  if (event && typeof event.hangoutLink === "string" && event.hangoutLink) {
+    return event.hangoutLink;
+  }
+
+  const entryPoints = event && event.conferenceData ? event.conferenceData.entryPoints : null;
+  if (!Array.isArray(entryPoints)) {
+    return "";
+  }
+
+  const videoEntry = entryPoints.find((entry) => entry && entry.entryPointType === "video" && entry.uri);
+  return videoEntry ? String(videoEntry.uri) : "";
+}
+
 function isZoomConfigured() {
   return Boolean(
     process.env.ZOOM_ACCOUNT_ID &&
@@ -1627,7 +1765,7 @@ async function createZoomMeeting({ teacher, topic, agenda, startTime, durationMi
   );
 
   if (!tokenResponse.ok) {
-    const details = await readZoomError(tokenResponse);
+    const details = await readApiError(tokenResponse);
     const error = new Error(`Zoom auth failed: ${details}. Re-check ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID and ZOOM_CLIENT_SECRET in .env.`);
     error.statusCode = 502;
     throw error;
@@ -1647,7 +1785,7 @@ async function createZoomMeeting({ teacher, topic, agenda, startTime, durationMi
         type: 2,
         start_time: startTime,
         duration: durationMinutes,
-        timezone: "Asia/Riyadh",
+        timezone: MEETING_TIMEZONE,
         agenda,
         settings: {
           join_before_host: false,
@@ -1660,7 +1798,7 @@ async function createZoomMeeting({ teacher, topic, agenda, startTime, durationMi
   );
 
   if (!meetingResponse.ok) {
-    const details = await readZoomError(meetingResponse);
+    const details = await readApiError(meetingResponse);
     const error = new Error(`Zoom could not create the meeting: ${details}. Verify ZOOM_USER_ID and that the Server-to-Server OAuth app has the meeting:write scope.`);
     error.statusCode = 502;
     throw error;
@@ -1674,7 +1812,7 @@ async function createZoomMeeting({ teacher, topic, agenda, startTime, durationMi
   };
 }
 
-async function readZoomError(response) {
+async function readApiError(response) {
   try {
     const payload = await response.json();
     if (payload && typeof payload === "object") {
@@ -1684,6 +1822,18 @@ async function readZoomError(response) {
 
       if (payload.reason) {
         return String(payload.reason);
+      }
+
+      if (payload.error && typeof payload.error === "object" && payload.error.message) {
+        return String(payload.error.message);
+      }
+
+      if (payload.error_description) {
+        return String(payload.error_description);
+      }
+
+      if (typeof payload.error === "string") {
+        return payload.error;
       }
     }
 
@@ -1702,4 +1852,6 @@ module.exports = app;
 module.exports.app = app;
 module.exports.buildDashboard = buildDashboard;
 module.exports.isZoomConfigured = isZoomConfigured;
+module.exports.isGoogleMeetConfigured = isGoogleMeetConfigured;
+module.exports.createGoogleMeetMeeting = createGoogleMeetMeeting;
 module.exports.normalizeExternalUrl = normalizeExternalUrl;

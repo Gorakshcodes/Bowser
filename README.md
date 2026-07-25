@@ -6,9 +6,9 @@ A small full-stack teacher-student portal for scheduling classes, sharing links,
 
 - Teacher login for Maths and English teachers
 - Schedule classes from the portal
-- Create Zoom meeting links automatically when Zoom credentials are configured
+- Create Zoom or Google Meet class links automatically when credentials are configured
 - Paste an existing Zoom, Google Meet, or Microsoft Teams class link instead
-- Manual link fallback when Zoom is not configured yet
+- Manual link fallback when no meeting credentials are configured yet
 - Share lesson details and Google Drive document links
 - Assign classes to one or more kids
 - Student access to their own assigned class links and shared documents
@@ -74,9 +74,37 @@ sessions valid across redeploys and across multiple server instances.
 
 If those values are missing, the portal still works and teachers can paste a manual class link instead.
 
-Only Zoom links can be created automatically. Google Meet and Teams links are pasted in by the teacher —
-for Google Meet you can paste the full link or just the `abc-defg-hij` meeting code. Each link is checked
-against that provider's own domain, so a Meet link cannot be saved under Zoom or the other way round.
+7. If you want automatic Google Meet link creation, fill in:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_REFRESH_TOKEN`
+- `GOOGLE_CALENDAR_ID` (optional, defaults to `primary`)
+
+Google Meet links are created through the Google Calendar API: the app adds a calendar event with a Meet
+conference attached and saves the join link on the class. To get those values:
+
+1. In the Google Cloud console, create a project and enable the **Google Calendar API**.
+2. Create an **OAuth client ID** and add `https://developers.google.com/oauthplayground` as a redirect URI
+   (or use your own redirect if you prefer).
+3. Authorise the scope `https://www.googleapis.com/auth/calendar.events` once, with `access_type=offline`
+   and `prompt=consent` so Google returns a refresh token.
+4. Put the client id, client secret, and that refresh token in `.env`.
+
+Sign in as the Google account that should own the meetings — that account is the Meet host.
+
+## Class links
+
+| Provider | Automatic creation | Paste your own |
+| --- | --- | --- |
+| Zoom | yes, with Zoom credentials | yes |
+| Google Meet | yes, with Google credentials | yes |
+| Microsoft Teams | no | yes |
+
+Auto-create options only appear in the class form once that provider's credentials are set, so teachers
+never see an option that cannot work. For a pasted Google Meet link you can use the full URL or just the
+`abc-defg-hij` meeting code. Each link is checked against that provider's own domain, so a Meet link
+cannot be saved under Zoom or the other way round.
 
 ## Run
 
@@ -99,4 +127,5 @@ Then open `http://localhost:3000`.
 - Logging in sets a signed, HTTP-only session cookie that lasts 7 days. The browser never holds a user id, and the API ignores any account id sent in a request.
 - Deactivating an account takes effect immediately, including for sessions that are already open.
 - Zoom integration uses Server-to-Server OAuth and creates meetings from the backend.
+- Google Meet integration uses an OAuth refresh token and the Calendar API, also from the backend.
 - Teachers can schedule a class with only `date/time` and selected `kid` accounts; topic, notes, Drive link, and meeting link are optional.

@@ -16,6 +16,7 @@
     students: [],
     managedUsers: [],
     zoomConfigured: false,
+    googleMeetConfigured: false,
     teamsSupported: true,
     message: null,
     authMode: "login",
@@ -186,7 +187,7 @@
     const editingClass = state.isEditingClass ? selectedClass : null;
     const formMeetingMode = editingClass
       ? getEditableMeetingOption(editingClass)
-      : (state.zoomConfigured ? "zoom-auto" : "zoom-manual");
+      : getDefaultMeetingOption();
     const formManualLink = editingClass && isManualMeetingOption(formMeetingMode)
       ? (editingClass.meetingLink || editingClass.zoomLink || "")
       : "";
@@ -490,9 +491,7 @@
                 <option value="${escapeAttribute(option.value)}"${formMeetingMode === option.value ? " selected" : ""}>${escapeHtml(option.label)}</option>
               `).join("")}
             </select>
-            <div class="field-hint">${escapeHtml(state.zoomConfigured
-              ? "Choose auto-create to let the app create the Zoom class link, or paste a link from Zoom, Google Meet, or Teams."
-              : "Zoom auto-create is not active right now, so paste a link from Zoom, Google Meet, or Teams, or leave it for later.")}</div>
+            <div class="field-hint">${escapeHtml(getMeetingModeHint())}</div>
           </div>
           <div class="field" data-manual-zoom-field ${isManualMeetingOption(formMeetingMode) ? "" : "hidden"}>
             <label for="manualMeetingLink" data-manual-link-label>${escapeHtml(manualLinkCopy.label)}</label>
@@ -1128,7 +1127,7 @@
     }
 
     if (autoHint) {
-      autoHint.hidden = meetingOption !== "zoom-auto";
+      autoHint.hidden = !isAutoMeetingOption(meetingOption);
     }
 
     if (manualLabel) {
@@ -1219,9 +1218,7 @@
   async function createClass(formData) {
     try {
       const manualMeetingLink = String(formData.get("manualMeetingLink") || "").trim();
-      const { meetingProvider, meetingMode } = parseMeetingOption(formData.get("meetingMode"), {
-        zoomConfigured: state.zoomConfigured
-      });
+      const { meetingProvider, meetingMode } = parseMeetingOption(formData.get("meetingMode"));
       const payload = {
         topic: String(formData.get("topic") || "").trim(),
         details: String(formData.get("details") || "").trim(),
@@ -1255,9 +1252,7 @@
   async function updateClass(formData) {
     try {
       const manualMeetingLink = String(formData.get("manualMeetingLink") || "").trim();
-      const { meetingProvider, meetingMode } = parseMeetingOption(formData.get("meetingMode"), {
-        zoomConfigured: state.zoomConfigured
-      });
+      const { meetingProvider, meetingMode } = parseMeetingOption(formData.get("meetingMode"));
       const payload = {
         topic: String(formData.get("topic") || "").trim(),
         details: String(formData.get("details") || "").trim(),
@@ -1438,6 +1433,7 @@
     state.students = payload.students || [];
     state.managedUsers = payload.managedUsers || [];
     state.zoomConfigured = Boolean(payload.zoomConfigured);
+    state.googleMeetConfigured = Boolean(payload.googleMeetConfigured);
     state.teamsSupported = payload.teamsSupported !== false;
 
     if (!state.zoomConfigured) {
@@ -1531,12 +1527,48 @@
 
   function getMeetingOptions() {
     return [
-      { value: "zoom-auto", label: "Create Zoom class link automatically", zoomOnly: true },
+      { value: "zoom-auto", label: "Create Zoom class link automatically", needs: "zoom" },
+      { value: "meet-auto", label: "Create Google Meet link automatically", needs: "meet" },
       { value: "zoom-manual", label: "Paste existing Zoom link" },
       { value: "meet-manual", label: "Paste existing Google Meet link" },
       { value: "teams-manual", label: "Paste existing Teams link" },
       { value: "none", label: "Add later" }
-    ].filter((option) => !option.zoomOnly || state.zoomConfigured);
+    ].filter((option) => {
+      if (option.needs === "zoom") {
+        return state.zoomConfigured;
+      }
+
+      if (option.needs === "meet") {
+        return state.googleMeetConfigured;
+      }
+
+      return true;
+    });
+  }
+
+  function isAutoMeetingOption(value) {
+    return String(value || "").endsWith("-auto");
+  }
+
+  function getDefaultMeetingOption() {
+    if (state.zoomConfigured) {
+      return "zoom-auto";
+    }
+
+    return state.googleMeetConfigured ? "meet-auto" : "zoom-manual";
+  }
+
+  function getMeetingModeHint() {
+    const autoProviders = [
+      state.zoomConfigured ? "Zoom" : "",
+      state.googleMeetConfigured ? "Google Meet" : ""
+    ].filter(Boolean);
+
+    if (!autoProviders.length) {
+      return "Automatic link creation is not active right now, so paste a link from Zoom, Google Meet, or Teams, or leave it for later.";
+    }
+
+    return `Choose auto-create to let the app create the ${autoProviders.join(" or ")} link, or paste a link from Zoom, Google Meet, or Teams.`;
   }
 
   function getMeetingOptionProvider(value) {
@@ -1553,18 +1585,26 @@
     return String(value || "").endsWith("-manual");
   }
 
-  function parseMeetingOption(value, { zoomConfigured }) {
+  function parseMeetingOption(value) {
     const normalized = String(value || "").trim().toLowerCase();
     if (normalized === "none") {
       return { meetingProvider: "none", meetingMode: "none" };
     }
 
     const meetingProvider = getMeetingOptionProvider(normalized);
-    if (meetingProvider === "zoom" && normalized === "zoom-auto") {
-      return { meetingProvider: "zoom", meetingMode: zoomConfigured ? "auto" : "manual" };
+    if (isAutoMeetingOption(normalized) && isAutoMeetingAvailable(meetingProvider)) {
+      return { meetingProvider, meetingMode: "auto" };
     }
 
     return { meetingProvider, meetingMode: "manual" };
+  }
+
+  function isAutoMeetingAvailable(provider) {
+    if (provider === "zoom") {
+      return state.zoomConfigured;
+    }
+
+    return provider === "meet" ? state.googleMeetConfigured : false;
   }
 
   function getManualLinkCopy(provider) {
@@ -1732,11 +1772,15 @@
       return "none";
     }
 
-    if (provider === "zoom" && classItem.zoomMeetingId) {
-      return "zoom-auto";
+    if (wasAutoCreated(classItem) && isAutoMeetingAvailable(provider)) {
+      return `${provider}-auto`;
     }
 
     return `${provider}-manual`;
+  }
+
+  function wasAutoCreated(classItem) {
+    return Boolean(classItem.autoMeetingId || classItem.zoomMeetingId);
   }
 
   function isCurrentOrUpcomingClass(classItem) {
@@ -1804,8 +1848,8 @@
       return { tone: "pending", label: `${getMeetingProviderLabel(provider)} link pending` };
     }
 
-    if (provider === "zoom" && classItem.zoomMeetingId) {
-      return { tone: "ready auto", label: "Zoom class link ready" };
+    if (wasAutoCreated(classItem)) {
+      return { tone: "ready auto", label: `${getMeetingProviderLabel(provider)} class link ready` };
     }
 
     return { tone: "ready", label: `${getMeetingProviderLabel(provider)} class ready` };
