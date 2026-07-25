@@ -50,6 +50,13 @@ const ALLOWED_IMAGE_TYPES = {
   "image/heic": ".heic",
   "image/heif": ".heif"
 };
+const SESSION_COOKIE_NAME = "bowser_session";
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SESSION_SECRET_ENV = String(process.env.SESSION_SECRET || "").trim();
+const USE_SECURE_COOKIES = IS_VERCEL || process.env.NODE_ENV === "production";
+const PASSWORD_SCHEME = "scrypt";
+const PASSWORD_KEY_LENGTH = 64;
+const PASSWORD_SALT_BYTES = 16;
 
 let storageInitializationError = null;
 const storageReady = initializeStorage().catch((error) => {
@@ -138,16 +145,20 @@ app.get("/api/health", handleAsync(async (_req, res) => {
 app.post("/api/login", handleAsync(async (req, res) => {
   const { email, password, role } = req.body || {};
   const normalizedRole = String(role || "").trim().toLowerCase();
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const normalizedPassword = String(password || "").trim();
   try {
     const database = await readDatabase();
-    const matchingUsers = database.users.filter(
-      (entry) =>
-        entry.email.toLowerCase() === String(email || "").trim().toLowerCase() &&
-        entry.password === String(password || "").trim()
-    );
-    const user = ["teacher", "student", "admin"].includes(normalizedRole)
-      ? matchingUsers.find((entry) => entry.role === normalizedRole)
-      : matchingUsers[0];
+    const candidates = database.users.filter((entry) => {
+      if (String(entry.email || "").toLowerCase() !== normalizedEmail) {
+        return false;
+      }
+
+      return ["teacher", "student", "admin"].includes(normalizedRole)
+        ? entry.role === normalizedRole
+        : true;
+    });
+    const user = candidates.find((entry) => verifyPassword(normalizedPassword, entry.password));
 
     if (!user) {
       res.status(401).json({ error: "Invalid email or password." });
@@ -156,21 +167,37 @@ app.post("/api/login", handleAsync(async (req, res) => {
 
     if (user.role !== "admin" && !isUserActive(user)) {
       res.status(403).json({
-        error: user.activationStatus === "inactive"
+        error: getActivationStatus(user) === "inactive"
           ? "Your account is deactivated. Please contact admin."
           : "Your account is waiting for admin activation."
       });
       return;
     }
 
+    let databaseChanged = ensureSessionSecret(database);
+    if (!isHashedPassword(user.password)) {
+      user.password = hashPassword(normalizedPassword);
+      databaseChanged = true;
+    }
+
+    if (databaseChanged) {
+      await writeDatabase(database);
+    }
+
+    setSessionCookie(res, createSessionToken(user, resolveSessionSecret(database)));
     res.json({
       user: sanitizeUser(user),
-      dashboard: await buildDashboard(user.id)
+      dashboard: buildDashboard(user, database)
     });
   } catch (error) {
     res.status(500).json({ error: error.message || "Could not complete login." });
   }
 }));
+
+app.post("/api/logout", (_req, res) => {
+  clearSessionCookie(res);
+  res.json({ message: "You have been logged out." });
+});
 
 app.post("/api/register", handleAsync(async (req, res) => {
   const { role, name, email, password, subject } = req.body || {};
@@ -212,7 +239,7 @@ app.post("/api/register", handleAsync(async (req, res) => {
       role: normalizedRole,
       name: normalizedName,
       email: normalizedEmail,
-      password: normalizedPassword,
+      password: hashPassword(normalizedPassword),
       isActive: false,
       activationStatus: "pending",
       createdAt: new Date().toISOString()
@@ -235,19 +262,12 @@ app.post("/api/register", handleAsync(async (req, res) => {
   }
 }));
 
-app.get("/api/dashboard", handleAsync(async (req, res) => {
-  const userId = String(req.query.userId || "");
-  try {
-    const dashboard = await buildDashboard(userId);
-    res.json(dashboard);
-  } catch (error) {
-    res.status(error.statusCode || (error.message === "User not found." ? 404 : 500)).json({ error: error.message });
-  }
+app.get("/api/dashboard", requireAuth(), handleAsync(async (req, res) => {
+  res.json(buildDashboard(req.currentUser, req.database));
 }));
 
-app.post("/api/classes", handleAsync(async (req, res) => {
+app.post("/api/classes", requireAuth("teacher"), handleAsync(async (req, res) => {
   const {
-    teacherId,
     topic,
     details,
     dateTime,
@@ -261,13 +281,8 @@ app.post("/api/classes", handleAsync(async (req, res) => {
     manualZoomLink
   } = req.body || {};
 
-  const database = await readDatabase();
-  const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
-
-  if (!teacher || !isUserActive(teacher)) {
-    res.status(403).json({ error: "Teacher account not found." });
-    return;
-  }
+  const database = req.database;
+  const teacher = req.currentUser;
 
   if (!dateTime) {
     res.status(400).json({ error: "Class date and time are required." });
@@ -361,10 +376,9 @@ app.post("/api/classes", handleAsync(async (req, res) => {
   }
 }));
 
-app.put("/api/classes/:classId", handleAsync(async (req, res) => {
+app.put("/api/classes/:classId", requireAuth("teacher"), handleAsync(async (req, res) => {
   const { classId } = req.params;
   const {
-    teacherId,
     topic,
     details,
     dateTime,
@@ -378,12 +392,12 @@ app.put("/api/classes/:classId", handleAsync(async (req, res) => {
     manualZoomLink
   } = req.body || {};
 
-  const database = await readDatabase();
-  const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
+  const database = req.database;
+  const teacher = req.currentUser;
   const classItem = database.classes.find((entry) => entry.id === classId);
 
-  if (!teacher || !isUserActive(teacher) || !classItem) {
-    res.status(404).json({ error: "Teacher or class not found." });
+  if (!classItem) {
+    res.status(404).json({ error: "Class not found." });
     return;
   }
 
@@ -480,22 +494,23 @@ app.put("/api/classes/:classId", handleAsync(async (req, res) => {
   }
 }));
 
-app.post("/api/submissions", handleHomeworkUpload, handleAsync(async (req, res) => {
-  const { classId, studentId } = req.body || {};
+app.post("/api/submissions", requireAuth("student"), handleHomeworkUpload, handleAsync(async (req, res) => {
+  const { classId } = req.body || {};
   const file = req.file;
 
-  if (!classId || !studentId || !file) {
-    res.status(400).json({ error: "Class, student, and homework image are required." });
+  if (!classId || !file) {
+    res.status(400).json({ error: "Class and homework image are required." });
     return;
   }
 
-  const database = await readDatabase();
-  const student = database.users.find((entry) => entry.id === studentId && entry.role === "student");
+  const database = req.database;
+  const student = req.currentUser;
+  const studentId = student.id;
   const classItem = database.classes.find((entry) => entry.id === classId);
 
-  if (!student || !isUserActive(student) || !classItem) {
+  if (!classItem) {
     cleanupFile(file.path);
-    res.status(404).json({ error: "Student or class could not be found." });
+    res.status(404).json({ error: "Class could not be found." });
     return;
   }
 
@@ -537,10 +552,9 @@ app.post("/api/submissions", handleHomeworkUpload, handleAsync(async (req, res) 
   res.status(201).json({ message: "Homework uploaded successfully." });
 }));
 
-app.put("/api/classes/:classId/meeting", handleAsync(async (req, res) => {
+app.put("/api/classes/:classId/meeting", requireAuth("teacher"), handleAsync(async (req, res) => {
   const { classId } = req.params;
   const {
-    teacherId,
     meetingProvider,
     meetingMode,
     useAutoZoom,
@@ -548,12 +562,12 @@ app.put("/api/classes/:classId/meeting", handleAsync(async (req, res) => {
     manualZoomLink
   } = req.body || {};
 
-  const database = await readDatabase();
-  const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
+  const database = req.database;
+  const teacher = req.currentUser;
   const classItem = database.classes.find((entry) => entry.id === classId);
 
-  if (!teacher || !isUserActive(teacher) || !classItem) {
-    res.status(404).json({ error: "Teacher or class not found." });
+  if (!classItem) {
+    res.status(404).json({ error: "Class not found." });
     return;
   }
 
@@ -617,15 +631,15 @@ app.put("/api/classes/:classId/meeting", handleAsync(async (req, res) => {
   }
 }));
 
-app.put("/api/submissions/:submissionId/grade", handleAsync(async (req, res) => {
+app.put("/api/submissions/:submissionId/grade", requireAuth("teacher"), handleAsync(async (req, res) => {
   const { submissionId } = req.params;
-  const { teacherId, score, feedback } = req.body || {};
-  const database = await readDatabase();
-  const teacher = database.users.find((entry) => entry.id === teacherId && entry.role === "teacher");
+  const { score, feedback } = req.body || {};
+  const database = req.database;
+  const teacher = req.currentUser;
   const submission = database.submissions.find((entry) => entry.id === submissionId);
 
-  if (!teacher || !isUserActive(teacher) || !submission) {
-    res.status(404).json({ error: "Teacher or submission not found." });
+  if (!submission) {
+    res.status(404).json({ error: "Submission not found." });
     return;
   }
 
@@ -642,17 +656,12 @@ app.put("/api/submissions/:submissionId/grade", handleAsync(async (req, res) => 
   res.json({ message: "Homework ranking saved." });
 }));
 
-app.put("/api/admin/users/:userId/activation", handleAsync(async (req, res) => {
+app.put("/api/admin/users/:userId/activation", requireAuth("admin"), handleAsync(async (req, res) => {
   const { userId } = req.params;
-  const { adminId, isActive } = req.body || {};
-  const database = await readDatabase();
-  const admin = database.users.find((entry) => entry.id === adminId && entry.role === "admin");
+  const { isActive } = req.body || {};
+  const database = req.database;
+  const admin = req.currentUser;
   const targetUser = database.users.find((entry) => entry.id === userId);
-
-  if (!admin || !isUserActive(admin)) {
-    res.status(403).json({ error: "Admin account not found." });
-    return;
-  }
 
   if (!targetUser || !["teacher", "student"].includes(targetUser.role)) {
     res.status(404).json({ error: "Teacher or student account not found." });
@@ -690,17 +699,7 @@ if (require.main === module) {
   });
 }
 
-async function buildDashboard(userId) {
-  const database = await readDatabase();
-  const user = database.users.find((entry) => entry.id === userId);
-  if (!user) {
-    throw new Error("User not found.");
-  }
-
-  if (user.role !== "admin" && !isUserActive(user)) {
-    throw createAccessError("Your account is not active.");
-  }
-
+function buildDashboard(user, database) {
   const students = database.users.filter((entry) => entry.role === "student");
   const classes = user.role === "teacher"
     ? database.classes.filter((entry) => entry.teacherId === user.id)
@@ -758,6 +757,191 @@ function sanitizeUser(user) {
   };
 }
 
+function requireAuth(...allowedRoles) {
+  return handleAsync(async (req, res, next) => {
+    const database = await readDatabase();
+    const secret = resolveSessionSecret(database);
+    if (!secret) {
+      res.status(500).json({ error: "Session storage is not ready. Please try again." });
+      return;
+    }
+
+    const session = readSessionToken(readCookie(req, SESSION_COOKIE_NAME), secret);
+    if (!session) {
+      clearSessionCookie(res);
+      res.status(401).json({ error: "Please log in to continue." });
+      return;
+    }
+
+    const user = database.users.find((entry) => entry.id === session.userId);
+    if (!user) {
+      clearSessionCookie(res);
+      res.status(401).json({ error: "Please log in to continue." });
+      return;
+    }
+
+    if (user.role !== "admin" && !isUserActive(user)) {
+      clearSessionCookie(res);
+      res.status(403).json({
+        error: getActivationStatus(user) === "inactive"
+          ? "Your account is deactivated. Please contact admin."
+          : "Your account is waiting for admin activation."
+      });
+      return;
+    }
+
+    if (allowedRoles.length && !allowedRoles.includes(user.role)) {
+      res.status(403).json({ error: "You do not have access to this action." });
+      return;
+    }
+
+    req.currentUser = user;
+    req.database = database;
+    next();
+  });
+}
+
+function hashPassword(plainPassword) {
+  const salt = crypto.randomBytes(PASSWORD_SALT_BYTES).toString("hex");
+  const derivedKey = crypto.scryptSync(String(plainPassword ?? ""), salt, PASSWORD_KEY_LENGTH);
+  return `${PASSWORD_SCHEME}$${salt}$${derivedKey.toString("hex")}`;
+}
+
+function isHashedPassword(storedPassword) {
+  return typeof storedPassword === "string" && storedPassword.startsWith(`${PASSWORD_SCHEME}$`);
+}
+
+function verifyPassword(plainPassword, storedPassword) {
+  const candidate = String(plainPassword ?? "");
+  if (!isHashedPassword(storedPassword)) {
+    // Accounts created before password hashing still hold a plaintext value.
+    // They are re-hashed on the next successful login and at startup.
+    return safeCompare(candidate, String(storedPassword ?? ""));
+  }
+
+  const [, salt, expectedHex] = storedPassword.split("$");
+  if (!salt || !expectedHex) {
+    return false;
+  }
+
+  const expected = Buffer.from(expectedHex, "hex");
+  const derivedKey = crypto.scryptSync(candidate, salt, expected.length || PASSWORD_KEY_LENGTH);
+  if (expected.length !== derivedKey.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(derivedKey, expected);
+}
+
+function safeCompare(left, right) {
+  const leftBuffer = Buffer.from(String(left), "utf8");
+  const rightBuffer = Buffer.from(String(right), "utf8");
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function ensureSessionSecret(database) {
+  if (!database.auth || typeof database.auth !== "object") {
+    database.auth = {};
+  }
+
+  if (typeof database.auth.sessionSecret === "string" && database.auth.sessionSecret.length >= 32) {
+    return false;
+  }
+
+  database.auth.sessionSecret = crypto.randomBytes(32).toString("hex");
+  return true;
+}
+
+function resolveSessionSecret(database) {
+  if (SESSION_SECRET_ENV) {
+    return SESSION_SECRET_ENV;
+  }
+
+  return database && database.auth ? String(database.auth.sessionSecret || "") : "";
+}
+
+function createSessionToken(user, secret) {
+  const payload = `${user.id}.${Date.now()}`;
+  return `${payload}.${signSessionPayload(payload, secret)}`;
+}
+
+function signSessionPayload(payload, secret) {
+  return crypto.createHmac("sha256", secret).update(payload).digest("hex");
+}
+
+function readSessionToken(token, secret) {
+  if (!token || !secret) {
+    return null;
+  }
+
+  const parts = String(token).split(".");
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  const [userId, issuedAtRaw, signature] = parts;
+  if (!safeCompare(signature, signSessionPayload(`${userId}.${issuedAtRaw}`, secret))) {
+    return null;
+  }
+
+  const issuedAt = Number(issuedAtRaw);
+  if (!Number.isFinite(issuedAt) || issuedAt <= 0 || Date.now() - issuedAt > SESSION_TTL_MS) {
+    return null;
+  }
+
+  return { userId, issuedAt };
+}
+
+function readCookie(req, name) {
+  const header = String(req.headers.cookie || "");
+  for (const part of header.split(";")) {
+    const separatorIndex = part.indexOf("=");
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    if (part.slice(0, separatorIndex).trim() !== name) {
+      continue;
+    }
+
+    try {
+      return decodeURIComponent(part.slice(separatorIndex + 1).trim());
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  return "";
+}
+
+function setSessionCookie(res, token) {
+  res.append("Set-Cookie", buildSessionCookie(token, Math.floor(SESSION_TTL_MS / 1000)));
+}
+
+function clearSessionCookie(res) {
+  res.append("Set-Cookie", buildSessionCookie("", 0));
+}
+
+function buildSessionCookie(value, maxAgeSeconds) {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(value)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    `Max-Age=${maxAgeSeconds}`
+  ];
+
+  if (USE_SECURE_COOKIES) {
+    parts.push("Secure");
+  }
+
+  return parts.join("; ");
+}
+
 async function readDatabase() {
   await ensureStorageReady();
   if (STORAGE_MODE === "postgres") {
@@ -799,6 +983,10 @@ function normalizeDatabase(database) {
   database.classes = Array.isArray(database.classes) ? database.classes : [];
   database.submissions = Array.isArray(database.submissions) ? database.submissions : [];
   let changed = false;
+  if (ensureSessionSecret(database)) {
+    changed = true;
+  }
+
   const usersBeforePurge = database.users.length;
   database.users = database.users.filter(
     (entry) => !LEGACY_DEMO_USER_IDS.has(entry.id) && !LEGACY_DEMO_EMAILS.has(String(entry.email || "").toLowerCase())
@@ -814,6 +1002,11 @@ function normalizeDatabase(database) {
   for (const user of database.users) {
     if (!user.createdAt) {
       user.createdAt = new Date().toISOString();
+      changed = true;
+    }
+
+    if (user.password && !isHashedPassword(user.password)) {
+      user.password = hashPassword(user.password);
       changed = true;
     }
 
@@ -923,11 +1116,13 @@ function normalizeDatabase(database) {
 
 function createSeedData() {
   const bootstrapAdmin = createBootstrapAdmin();
-  return {
+  const database = {
     users: bootstrapAdmin ? [bootstrapAdmin] : [],
     classes: [],
     submissions: []
   };
+  ensureSessionSecret(database);
+  return database;
 }
 
 function ensureDirectory(directoryPath) {
@@ -1215,7 +1410,7 @@ function createBootstrapAdmin() {
     role: "admin",
     name: ADMIN_NAME,
     email: ADMIN_EMAIL,
-    password: ADMIN_PASSWORD,
+    password: hashPassword(ADMIN_PASSWORD),
     subject: "",
     isActive: true,
     activationStatus: "active",
@@ -1235,7 +1430,9 @@ function ensureBootstrapAdmin(database) {
 
   if (existingAdmin) {
     let changed = false;
-    if (existingAdmin.password !== bootstrapAdmin.password) {
+    // Re-hash whenever the stored value no longer matches ADMIN_PASSWORD, which also
+    // migrates an admin account that predates password hashing.
+    if (!isHashedPassword(existingAdmin.password) || !verifyPassword(ADMIN_PASSWORD, existingAdmin.password)) {
       existingAdmin.password = bootstrapAdmin.password;
       changed = true;
     }
@@ -1359,12 +1556,6 @@ function resolveSelectedStudents(database, studentIds) {
 function createValidationError(message) {
   const error = new Error(message);
   error.statusCode = 400;
-  return error;
-}
-
-function createAccessError(message) {
-  const error = new Error(message);
-  error.statusCode = 403;
   return error;
 }
 

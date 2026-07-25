@@ -1,5 +1,4 @@
 (function () {
-  const SESSION_KEY = "bowser-learning-session";
   const MAX_HOMEWORK_FILE_SIZE = 8 * 1024 * 1024;
   const DASHBOARD_REFRESH_MS = 20000;
   const ALLOWED_HOMEWORK_TYPES = new Set([
@@ -43,19 +42,17 @@
   window.setInterval(refreshActiveSessionSilently, DASHBOARD_REFRESH_MS);
 
   async function initialize() {
-    const session = readSession();
-    if (!session || !session.userId) {
-      renderApp();
-      return;
-    }
-
     try {
-      await refreshDashboard(session.userId);
-    } catch (_error) {
-      clearSession();
+      await refreshDashboard();
+    } catch (error) {
+      if (error.status === 401) {
+        renderApp();
+        return;
+      }
+
       renderApp({
         type: "error",
-        text: "Your session expired. Please log in again."
+        text: error.message || "Could not load your dashboard. Please log in again."
       });
     }
   }
@@ -1052,27 +1049,40 @@
     }
 
     if (actionButton.dataset.action === "logout") {
-      clearSession();
-      state.user = null;
-      state.classes = [];
-      state.submissions = [];
-      state.students = [];
-      state.managedUsers = [];
-      state.zoomConfigured = false;
-      state.teamsSupported = true;
-      state.authMode = "login";
-      state.authRole = "teacher";
-      state.registerRole = "student";
-      state.meetingProvider = "none";
-      state.zoomMode = "manual";
-      state.dashboardTab = "meetings";
-      state.selectedCalendarStudentId = "all";
-      state.calendarView = "week";
-      state.calendarCursor = createDateKey(new Date());
-      state.selectedClassId = null;
-      state.isEditingClass = false;
-      renderApp({ type: "success", text: "You have been logged out." });
+      void logoutUser();
     }
+  }
+
+  async function logoutUser() {
+    try {
+      await api("/api/logout", { method: "POST" });
+    } catch (_error) {
+      // The local session is cleared either way; the cookie expires on its own.
+    }
+
+    resetSessionState();
+    renderApp({ type: "success", text: "You have been logged out." });
+  }
+
+  function resetSessionState() {
+    state.user = null;
+    state.classes = [];
+    state.submissions = [];
+    state.students = [];
+    state.managedUsers = [];
+    state.zoomConfigured = false;
+    state.teamsSupported = true;
+    state.authMode = "login";
+    state.authRole = "teacher";
+    state.registerRole = "student";
+    state.meetingProvider = "none";
+    state.zoomMode = "manual";
+    state.dashboardTab = "meetings";
+    state.selectedCalendarStudentId = "all";
+    state.calendarView = "week";
+    state.calendarCursor = createDateKey(new Date());
+    state.selectedClassId = null;
+    state.isEditingClass = false;
   }
 
   function handleChange(event) {
@@ -1134,7 +1144,6 @@
       });
 
       applyDashboardPayload(payload.dashboard);
-      writeSession({ userId: payload.user.id });
       renderApp({ type: "success", text: `Welcome back, ${payload.user.name}.` });
     } catch (error) {
       renderApp({ type: "error", text: error.message });
@@ -1170,13 +1179,10 @@
       const response = await api(`/api/admin/users/${encodeURIComponent(userId)}/activation`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          adminId: state.user.id,
-          isActive
-        })
+        body: JSON.stringify({ isActive })
       });
 
-      await refreshDashboard(state.user.id, {
+      await refreshDashboard({
         type: "success",
         text: response.message || "Account access updated."
       });
@@ -1202,7 +1208,6 @@
         hasManualLink: Boolean(manualMeetingLink)
       });
       const payload = {
-        teacherId: state.user.id,
         topic: String(formData.get("topic") || "").trim(),
         details: String(formData.get("details") || "").trim(),
         dateTime: String(formData.get("dateTime") || "").trim(),
@@ -1223,7 +1228,7 @@
 
       state.selectedClassId = response.classItem ? response.classItem.id : null;
       state.isEditingClass = false;
-      await refreshDashboard(state.user.id, {
+      await refreshDashboard({
         type: "success",
         text: buildClassSaveMessage(response.classItem, response.message || "Class scheduled successfully.")
       });
@@ -1241,7 +1246,6 @@
         allowNone: true
       });
       const payload = {
-        teacherId: state.user.id,
         topic: String(formData.get("topic") || "").trim(),
         details: String(formData.get("details") || "").trim(),
         dateTime: String(formData.get("dateTime") || "").trim(),
@@ -1262,7 +1266,7 @@
 
       state.selectedClassId = response.classItem ? response.classItem.id : null;
       state.isEditingClass = false;
-      await refreshDashboard(state.user.id, {
+      await refreshDashboard({
         type: "success",
         text: buildClassSaveMessage(response.classItem, response.message || "Class updated successfully.")
       });
@@ -1291,7 +1295,6 @@
 
     const body = new FormData();
     body.append("classId", form.dataset.classId);
-    body.append("studentId", state.user.id);
     body.append("homework", file);
 
     try {
@@ -1300,7 +1303,7 @@
         body
       });
 
-      await refreshDashboard(state.user.id, {
+      await refreshDashboard({
         type: "success",
         text: response.message || "Homework uploaded successfully."
       });
@@ -1348,13 +1351,12 @@
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          teacherId: state.user.id,
           score: String(formData.get("score") || "").trim(),
           feedback: String(formData.get("feedback") || "").trim()
         })
       });
 
-      await refreshDashboard(state.user.id, {
+      await refreshDashboard({
         type: "success",
         text: response.message || "Homework ranking saved."
       });
@@ -1363,8 +1365,8 @@
     }
   }
 
-  async function refreshDashboard(userId, message) {
-    const payload = await api(`/api/dashboard?userId=${encodeURIComponent(userId)}`);
+  async function refreshDashboard(message) {
+    const payload = await api("/api/dashboard");
     applyDashboardPayload(payload);
     renderApp(message);
   }
@@ -1375,7 +1377,7 @@
     }
 
     try {
-      const payload = await api(`/api/dashboard?userId=${encodeURIComponent(state.user.id)}`);
+      const payload = await api("/api/dashboard");
       const classesChanged = JSON.stringify(state.classes) !== JSON.stringify(payload.classes || []);
       const submissionsChanged = JSON.stringify(state.submissions) !== JSON.stringify(payload.submissions || []);
       const studentsChanged = JSON.stringify(state.students) !== JSON.stringify(payload.students || []);
@@ -1386,18 +1388,29 @@
       if (classesChanged || submissionsChanged || studentsChanged || managedUsersChanged) {
         renderApp();
       }
-    } catch (_error) {
-      // Ignore background refresh failures and let the next explicit action surface errors.
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) {
+        resetSessionState();
+        renderApp({
+          type: "error",
+          text: error.message || "Your session has ended. Please log in again."
+        });
+        return;
+      }
+
+      // Ignore other background refresh failures and let the next explicit action surface errors.
     }
   }
 
   async function api(url, options = {}) {
-    const response = await fetch(url, options);
+    const response = await fetch(url, { credentials: "same-origin", ...options });
     const isJson = response.headers.get("content-type")?.includes("application/json");
     const payload = isJson ? await response.json() : null;
 
     if (!response.ok) {
-      throw new Error((payload && payload.error) || "Something went wrong.");
+      const error = new Error((payload && payload.error) || "Something went wrong.");
+      error.status = response.status;
+      throw error;
     }
 
     return payload;
@@ -1444,24 +1457,6 @@
       state.isEditingClass = false;
       state.selectedCalendarStudentId = "all";
     }
-  }
-
-  function readSession() {
-    try {
-      const raw = sessionStorage.getItem(SESSION_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch (_error) {
-      clearSession();
-      return null;
-    }
-  }
-
-  function writeSession(payload) {
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(payload));
-  }
-
-  function clearSession() {
-    sessionStorage.removeItem(SESSION_KEY);
   }
 
   function formatDate(value) {

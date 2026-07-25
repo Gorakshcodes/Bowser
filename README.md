@@ -14,6 +14,8 @@ A small full-stack teacher-student portal for scheduling classes, sharing links,
 - Homework photo upload from device camera or gallery
 - Homework upload validation for image type and size
 - Teacher review, ranking, and feedback for homework
+- Hashed password storage and signed, HTTP-only login session cookies
+- Every API route resolves the signed-in account from the session cookie
 - Week and month calendar views for both teachers and students
 - Kid-name calendar filtering for teachers
 - Local JSON storage for development
@@ -55,7 +57,14 @@ The app uses:
 - `ADMIN_PASSWORD`
 - `ADMIN_NAME`
 
-5. If you want automatic Zoom meeting creation, fill in:
+5. For production, set a login session signing key:
+
+- `SESSION_SECRET`
+
+When it is empty the app generates a key and stores it with the portal data. Setting it explicitly keeps
+sessions valid across redeploys and across multiple server instances.
+
+6. If you want automatic Zoom meeting creation, fill in:
 
 - `ZOOM_ACCOUNT_ID`
 - `ZOOM_CLIENT_ID`
@@ -81,5 +90,8 @@ Then open `http://localhost:3000`.
 - Local development stores uploaded homework files in `uploads/`.
 - Only `JPG`, `PNG`, `WEBP`, `HEIC`, and `HEIF` homework images up to `8 MB` are accepted.
 - Teachers and students can only log in after an admin activates their account.
+- Passwords are stored as `scrypt` hashes. Accounts saved before this change are re-hashed automatically on the next startup, so existing passwords keep working.
+- Logging in sets a signed, HTTP-only session cookie that lasts 7 days. The browser never holds a user id, and the API ignores any account id sent in a request.
+- Deactivating an account takes effect immediately, including for sessions that are already open.
 - Zoom integration uses Server-to-Server OAuth and creates meetings from the backend.
 - Teachers can schedule a class with only `date/time` and selected `kid` accounts; topic, notes, Drive link, and meeting link are optional.
