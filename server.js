@@ -50,6 +50,25 @@ const ALLOWED_IMAGE_TYPES = {
   "image/heic": ".heic",
   "image/heif": ".heif"
 };
+const MEETING_PROVIDERS = {
+  zoom: {
+    label: "Zoom",
+    hosts: ["zoom.us"]
+  },
+  meet: {
+    label: "Google Meet",
+    hosts: ["meet.google.com"]
+  },
+  teams: {
+    label: "Teams",
+    hosts: [
+      "teams.microsoft.com",
+      "teams.live.com",
+      "teams.microsoft.us",
+      "teams.microsoft.de"
+    ]
+  }
+};
 const SESSION_COOKIE_NAME = "bowser_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_SECRET_ENV = String(process.env.SESSION_SECRET || "").trim();
@@ -1309,6 +1328,17 @@ function normalizeMeetingLink(value, meetingProvider) {
     }
   }
 
+  if (meetingProvider === "meet") {
+    // Google Meet codes are three groups of letters, e.g. abc-defg-hij.
+    if (/^[a-z]{3}-[a-z]{4}-[a-z]{3}$/i.test(trimmed)) {
+      return `https://meet.google.com/${trimmed.toLowerCase()}`;
+    }
+
+    if (/^(www\.)?meet\.google\.com\//i.test(trimmed)) {
+      return `https://${trimmed.replace(/^https?:\/\//i, "")}`;
+    }
+  }
+
   if (meetingProvider === "teams" && /^(?:[\w-]+\.)?teams\.(?:microsoft\.(?:com|us|de)|live\.com)\//i.test(trimmed)) {
     return `https://${trimmed.replace(/^https?:\/\//i, "")}`;
   }
@@ -1320,6 +1350,10 @@ function normalizeMeetingProvider(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "teams") {
     return "teams";
+  }
+
+  if (["meet", "google-meet", "googlemeet", "google_meet", "google meet"].includes(normalized)) {
+    return "meet";
   }
 
   if (normalized === "none") {
@@ -1462,8 +1496,16 @@ function normalizeStoredMeetingProvider(classItem) {
     return "teams";
   }
 
-  if (classItem.meetingLink && isLikelyTeamsLink(classItem.meetingLink)) {
+  if (classItem.meetingProvider === "meet") {
+    return "meet";
+  }
+
+  if (classItem.meetingLink && isLikelyProviderLink(classItem.meetingLink, "teams")) {
     return "teams";
+  }
+
+  if (classItem.meetingLink && isLikelyProviderLink(classItem.meetingLink, "meet")) {
+    return "meet";
   }
 
   if (!String(classItem.meetingLink || classItem.zoomLink || "").trim()) {
@@ -1494,14 +1536,8 @@ function getMeetingHosts(meetingProvider) {
     return null;
   }
 
-  return meetingProvider === "teams"
-    ? [
-        "teams.microsoft.com",
-        "teams.live.com",
-        "teams.microsoft.us",
-        "teams.microsoft.de"
-      ]
-    : ["zoom.us"];
+  const provider = MEETING_PROVIDERS[meetingProvider] || MEETING_PROVIDERS.zoom;
+  return provider.hosts;
 }
 
 function getMeetingProviderLabel(meetingProvider) {
@@ -1509,18 +1545,19 @@ function getMeetingProviderLabel(meetingProvider) {
     return "No class link";
   }
 
-  return meetingProvider === "teams" ? "Teams" : "Zoom";
+  const provider = MEETING_PROVIDERS[meetingProvider] || MEETING_PROVIDERS.zoom;
+  return provider.label;
 }
 
-function isLikelyTeamsLink(value) {
+function isLikelyProviderLink(value, meetingProvider) {
+  const provider = MEETING_PROVIDERS[meetingProvider];
+  if (!provider) {
+    return false;
+  }
+
   try {
     const parsed = new URL(String(value || "").trim());
-    return [
-      "teams.microsoft.com",
-      "teams.live.com",
-      "teams.microsoft.us",
-      "teams.microsoft.de"
-    ].some((host) => hasMatchingHostname(parsed.hostname, host));
+    return provider.hosts.some((host) => hasMatchingHostname(parsed.hostname, host));
   } catch (_error) {
     return false;
   }

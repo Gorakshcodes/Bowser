@@ -7,7 +7,8 @@ A small full-stack teacher-student portal for scheduling classes, sharing links,
 - Teacher login for Maths and English teachers
 - Schedule classes from the portal
 - Create Zoom meeting links automatically when Zoom credentials are configured
-- Manual Zoom link fallback when Zoom is not configured yet
+- Paste an existing Zoom, Google Meet, or Microsoft Teams class link instead
+- Manual link fallback when Zoom is not configured yet
 - Share lesson details and Google Drive document links
 - Assign classes to one or more kids
 - Student access to their own assigned class links and shared documents
@@ -71,7 +72,11 @@ sessions valid across redeploys and across multiple server instances.
 - `ZOOM_CLIENT_SECRET`
 - `ZOOM_USER_ID`
 
-If those values are missing, the portal still works and teachers can paste a manual Zoom link instead.
+If those values are missing, the portal still works and teachers can paste a manual class link instead.
+
+Only Zoom links can be created automatically. Google Meet and Teams links are pasted in by the teacher —
+for Google Meet you can paste the full link or just the `abc-defg-hij` meeting code. Each link is checked
+against that provider's own domain, so a Meet link cannot be saved under Zoom or the other way round.
 
 ## Run
 
