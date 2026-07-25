@@ -4,23 +4,20 @@ A small full-stack teacher-student portal for scheduling classes, sharing links,
 
 ## Features
 
-- Teacher login for Maths and English teachers
-- Schedule classes from the portal
+- Teacher, kid (student), and admin accounts
+- Schedule one class or a full **month series** in one step
+  - Selected weekdays, alternate days, or every day
+  - Up to 6 class times per day (e.g. 10:00, 14:00, 17:00)
 - Create Zoom or Google Meet class links automatically when credentials are configured
 - Paste an existing Zoom, Google Meet, or Microsoft Teams class link instead
-- Manual link fallback when no meeting credentials are configured yet
-- Share lesson details and Google Drive document links
-- Assign classes to one or more kids
-- Student access to their own assigned class links and shared documents
-- Homework photo upload from device camera or gallery
-- Homework upload validation for image type and size
+- Shared meeting link applied across a series (one room for the month)
+- Optional topic, notes, and Google Drive materials
+- Kid-friendly student home: next class hero, big join buttons, simple homework flow
+- Homework photo upload (camera or gallery) with type/size validation
 - Teacher review, ranking, and feedback for homework
-- Hashed password storage and signed, HTTP-only login session cookies
-- Every API route resolves the signed-in account from the session cookie
-- Week and month calendar views for both teachers and students
-- Kid-name calendar filtering for teachers
-- Local JSON storage for development
-- Postgres-backed storage for Vercel and production deployments
+- Security: scrypt password hashes, signed HTTP-only cookies, login rate limits, security headers
+- Week and month calendars; teachers can filter by kid
+- Local JSON storage for development; Postgres for Vercel/production
 
 ## Accounts
 
@@ -114,6 +111,41 @@ npm start
 
 Then open `http://localhost:3000`.
 
+## Test
+
+```bash
+npm test
+```
+
+Runs API smoke tests (health, auth, activation, single + series scheduling, access control).
+
+## Month series scheduling
+
+On the teacher **Schedule class** form:
+
+1. Choose **Month series** (instead of one class).
+2. Set **From** / **To** dates (defaults to rest of the current month).
+3. Pick a pattern:
+   - **Selected weekdays** — tick Mon–Sun as needed
+   - **Alternate days** — every other day from the start date
+   - **Every day**
+4. Add one or more **times each day** (for example three slots: morning, afternoon, evening).
+5. Save once — up to 90 classes can be created in a single series.
+
+Auto-created Zoom/Meet links for a series are generated **once** and shared across all sessions in that series.
+
+## Deploy (Vercel)
+
+1. Push the repo and import it in Vercel.
+2. Set environment variables (see `.env.example`):
+   - `DATABASE_URL` (required for durable production data)
+   - `DATABASE_SSL=true` unless your provider forbids SSL
+   - `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME`
+   - `SESSION_SECRET` (long random string; required so sessions survive redeploys)
+   - Optional Zoom / Google Meet credentials
+3. Deploy. Entry is `server.js` via `vercel.json`.
+4. After deploy, open `/api/health` and confirm `"ok": true` and `"storageMode": "postgres"`.
+
 ## Notes
 
 - Static files are served by `server.js`.
@@ -123,9 +155,10 @@ Then open `http://localhost:3000`.
 - Local development stores uploaded homework files in `uploads/`.
 - Only `JPG`, `PNG`, `WEBP`, `HEIC`, and `HEIF` homework images up to `8 MB` are accepted.
 - Teachers and students can only log in after an admin activates their account.
-- Passwords are stored as `scrypt` hashes. Accounts saved before this change are re-hashed automatically on the next startup, so existing passwords keep working.
-- Logging in sets a signed, HTTP-only session cookie that lasts 7 days. The browser never holds a user id, and the API ignores any account id sent in a request.
+- Passwords must be at least 8 characters and are stored as `scrypt` hashes.
+- Logging in sets a signed, HTTP-only, `SameSite=Strict` session cookie that lasts 7 days.
+- Failed logins are rate-limited per client IP.
 - Deactivating an account takes effect immediately, including for sessions that are already open.
 - Zoom integration uses Server-to-Server OAuth and creates meetings from the backend.
 - Google Meet integration uses an OAuth refresh token and the Calendar API, also from the backend.
-- Teachers can schedule a class with only `date/time` and selected `kid` accounts; topic, notes, Drive link, and meeting link are optional.
+- Teachers can schedule with only kid + date/time (or a series); topic, notes, Drive link, and meeting link are optional.

@@ -10,6 +10,7 @@ loadEnvFile(path.join(__dirname, ".env"));
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const IS_VERCEL = Boolean(process.env.VERCEL);
+const IS_PRODUCTION = IS_VERCEL || process.env.NODE_ENV === "production";
 const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || "";
 const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
 const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "").trim();
@@ -21,6 +22,13 @@ const DATA_FILE = path.join(DATA_DIR, "portal-data.json");
 const REPO_DATA_FILE = path.join(__dirname, "data", "portal-data.json");
 const UPLOADS_DIR = path.join(RUNTIME_ROOT, "uploads");
 const STORAGE_STATE_KEY = "default";
+const MAX_SERIES_CLASSES = 90;
+const MIN_PASSWORD_LENGTH = 8;
+const MAX_TEXT_LENGTH = 2000;
+const MAX_TOPIC_LENGTH = 200;
+const LOGIN_RATE_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_RATE_MAX_ATTEMPTS = 12;
+const loginAttemptTracker = new Map();
 const pool = STORAGE_MODE === "postgres"
   ? new Pool({
       connectionString: DATABASE_URL,
@@ -81,6 +89,13 @@ const USE_SECURE_COOKIES = IS_VERCEL || process.env.NODE_ENV === "production";
 const PASSWORD_SCHEME = "scrypt";
 const PASSWORD_KEY_LENGTH = 64;
 const PASSWORD_SALT_BYTES = 16;
+const DUMMY_PASSWORD_HASH = hashPasswordBootstrap("login-rate-dummy");
+
+function hashPasswordBootstrap(plainPassword) {
+  const salt = crypto.randomBytes(PASSWORD_SALT_BYTES).toString("hex");
+  const derivedKey = crypto.scryptSync(String(plainPassword ?? ""), salt, PASSWORD_KEY_LENGTH);
+  return `${PASSWORD_SCHEME}$${salt}$${derivedKey.toString("hex")}`;
+}
 
 let storageInitializationError = null;
 const storageReady = initializeStorage().catch((error) => {
@@ -131,10 +146,32 @@ const handleAsync = (handler) => (req, res, next) => {
   Promise.resolve(handler(req, res, next)).catch(next);
 };
 
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.disable("x-powered-by");
+app.set("trust proxy", 1);
+
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  if (IS_PRODUCTION) {
+    res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
+  }
+  next();
+});
+
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 if (STORAGE_MODE !== "postgres") {
-  app.use("/uploads", express.static(UPLOADS_DIR));
+  app.use("/uploads", express.static(UPLOADS_DIR, {
+    fallthrough: true,
+    setHeaders(res) {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "private, max-age=3600");
+    }
+  }));
 }
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
@@ -168,10 +205,16 @@ app.get("/api/health", handleAsync(async (_req, res) => {
 }));
 
 app.post("/api/login", handleAsync(async (req, res) => {
+  const clientKey = getClientRateKey(req);
+  if (isRateLimited(clientKey)) {
+    res.status(429).json({ error: "Too many login attempts. Please wait a few minutes and try again." });
+    return;
+  }
+
   const { email, password, role } = req.body || {};
   const normalizedRole = String(role || "").trim().toLowerCase();
-  const normalizedEmail = String(email || "").trim().toLowerCase();
-  const normalizedPassword = String(password || "").trim();
+  const normalizedEmail = String(email || "").trim().toLowerCase().slice(0, 254);
+  const normalizedPassword = String(password || "");
   try {
     const database = await readDatabase();
     const candidates = database.users.filter((entry) => {
@@ -183,14 +226,24 @@ app.post("/api/login", handleAsync(async (req, res) => {
         ? entry.role === normalizedRole
         : true;
     });
-    const user = candidates.find((entry) => verifyPassword(normalizedPassword, entry.password));
+
+    // Always perform a password check to reduce timing differences between
+    // missing accounts and wrong passwords.
+    let user = null;
+    if (candidates.length) {
+      user = candidates.find((entry) => verifyPassword(normalizedPassword, entry.password)) || null;
+    } else {
+      verifyPassword(normalizedPassword, DUMMY_PASSWORD_HASH);
+    }
 
     if (!user) {
+      registerFailedLogin(clientKey);
       res.status(401).json({ error: "Invalid email or password." });
       return;
     }
 
     if (user.role !== "admin" && !isUserActive(user)) {
+      registerFailedLogin(clientKey);
       res.status(403).json({
         error: getActivationStatus(user) === "inactive"
           ? "Your account is deactivated. Please contact admin."
@@ -198,6 +251,8 @@ app.post("/api/login", handleAsync(async (req, res) => {
       });
       return;
     }
+
+    clearFailedLogins(clientKey);
 
     let databaseChanged = ensureSessionSecret(database);
     if (!isHashedPassword(user.password)) {
@@ -215,7 +270,7 @@ app.post("/api/login", handleAsync(async (req, res) => {
       dashboard: buildDashboard(user, database)
     });
   } catch (error) {
-    res.status(500).json({ error: error.message || "Could not complete login." });
+    res.status(500).json({ error: "Could not complete login." });
   }
 }));
 
@@ -247,8 +302,18 @@ app.post("/api/register", handleAsync(async (req, res) => {
     return;
   }
 
-  if (normalizedPassword.length < 4) {
-    res.status(400).json({ error: "Password must be at least 4 characters long." });
+  if (normalizedName.length > 80) {
+    res.status(400).json({ error: "Name must be 80 characters or fewer." });
+    return;
+  }
+
+  if (normalizedPassword.length < MIN_PASSWORD_LENGTH) {
+    res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters long.` });
+    return;
+  }
+
+  if (normalizedPassword.length > 128) {
+    res.status(400).json({ error: "Password must be 128 characters or fewer." });
     return;
   }
 
@@ -262,8 +327,8 @@ app.post("/api/register", handleAsync(async (req, res) => {
     const user = {
       id: `${normalizedRole}-${crypto.randomUUID()}`,
       role: normalizedRole,
-      name: normalizedName,
-      email: normalizedEmail,
+      name: normalizedName.slice(0, 80),
+      email: normalizedEmail.slice(0, 254),
       password: hashPassword(normalizedPassword),
       isActive: false,
       activationStatus: "pending",
@@ -271,7 +336,7 @@ app.post("/api/register", handleAsync(async (req, res) => {
     };
 
     if (normalizedRole === "teacher") {
-      user.subject = normalizedSubject || "General";
+      user.subject = (normalizedSubject || "General").slice(0, 80);
     }
 
     database.users.push(user);
@@ -283,7 +348,7 @@ app.post("/api/register", handleAsync(async (req, res) => {
       user: sanitizeUser(user)
     });
   } catch (error) {
-    res.status(500).json({ error: error.message || "Could not create the account." });
+    res.status(500).json({ error: "Could not create the account." });
   }
 }));
 
@@ -292,85 +357,63 @@ app.get("/api/dashboard", requireAuth(), handleAsync(async (req, res) => {
 }));
 
 app.post("/api/classes", requireAuth("teacher"), handleAsync(async (req, res) => {
-  const {
-    topic,
-    details,
-    dateTime,
-    durationMinutes,
-    driveLink,
-    studentIds,
-    meetingProvider,
-    meetingMode,
-    useAutoZoom,
-    manualMeetingLink,
-    manualZoomLink
-  } = req.body || {};
-
   const database = req.database;
   const teacher = req.currentUser;
 
-  if (!dateTime) {
-    res.status(400).json({ error: "Class date and time are required." });
-    return;
-  }
-
-  const scheduledDate = new Date(String(dateTime));
-  if (Number.isNaN(scheduledDate.getTime())) {
-    res.status(400).json({ error: "Please choose a valid class date and time." });
-    return;
-  }
-
-  const normalizedDuration = Number(durationMinutes || 45);
-  if (!Number.isInteger(normalizedDuration) || normalizedDuration < 15 || normalizedDuration > 180) {
-    res.status(400).json({ error: "Class duration must be between 15 and 180 minutes." });
-    return;
-  }
-
   try {
-    const normalizedDriveLink = String(driveLink || "").trim()
-      ? normalizeExternalUrl(driveLink, {
+    const plan = buildClassSchedulePlan(req.body || {});
+    const selectedStudents = resolveSelectedStudents(database, plan.studentIds);
+    const topic = clampText(plan.topic, MAX_TOPIC_LENGTH)
+      || `Class with ${selectedStudents.map((student) => student.name).join(", ")}`;
+    const details = clampText(plan.details, MAX_TEXT_LENGTH);
+    const normalizedDriveLink = plan.driveLink
+      ? normalizeExternalUrl(plan.driveLink, {
           label: "Google Drive link",
           allowedHosts: ["drive.google.com", "docs.google.com"]
         })
       : "";
-    const selectedStudents = resolveSelectedStudents(database, studentIds);
-    const normalizedMeetingProvider = normalizeMeetingProvider(meetingProvider);
+    const normalizedMeetingProvider = normalizeMeetingProvider(plan.meetingProvider);
     const normalizedMeetingMode = normalizeMeetingMode({
       meetingProvider: normalizedMeetingProvider,
-      meetingMode,
-      useAutoZoom
+      meetingMode: plan.meetingMode,
+      useAutoZoom: plan.useAutoZoom
     });
-    const rawManualMeetingLink = String(manualMeetingLink || manualZoomLink || "").trim();
 
     let meetingLink = "";
     let autoMeeting = null;
+    const firstSlot = plan.slots[0];
 
     if (normalizedMeetingMode === "auto") {
+      // One shared auto meeting link for the whole series keeps bulk
+      // scheduling fast and matches a fixed classroom meeting room.
       autoMeeting = await createAutoMeeting(normalizedMeetingProvider, {
         teacher,
-        topic: String(topic || "").trim() || `Class with ${selectedStudents.map((student) => student.name).join(", ")}`,
-        agenda: String(details || "").trim(),
-        startTime: scheduledDate.toISOString(),
-        durationMinutes: normalizedDuration
+        topic,
+        agenda: details,
+        startTime: firstSlot.toISOString(),
+        durationMinutes: plan.durationMinutes
       });
       meetingLink = autoMeeting.joinUrl;
-    } else if (normalizedMeetingProvider !== "none" && rawManualMeetingLink) {
-      const normalizedLink = normalizeMeetingLink(rawManualMeetingLink, normalizedMeetingProvider);
+    } else if (normalizedMeetingProvider !== "none" && plan.manualMeetingLink) {
+      const normalizedLink = normalizeMeetingLink(plan.manualMeetingLink, normalizedMeetingProvider);
       meetingLink = normalizeExternalUrl(normalizedLink, {
         label: `${getMeetingProviderLabel(normalizedMeetingProvider)} class link`,
         allowedHosts: getMeetingHosts(normalizedMeetingProvider)
       });
     }
 
-    const classItem = {
+    const seriesId = plan.slots.length > 1 ? `series-${crypto.randomUUID()}` : "";
+    const createdAt = new Date().toISOString();
+    const classItems = plan.slots.map((slot) => ({
       id: `class-${crypto.randomUUID()}`,
+      seriesId,
       teacherId: teacher.id,
       teacherName: teacher.name,
       subject: teacher.subject,
-      topic: String(topic || "").trim() || `Class with ${selectedStudents.map((student) => student.name).join(", ")}`,
-      details: String(details || "").trim(),
-      dateTime: scheduledDate.toISOString(),
-      durationMinutes: normalizedDuration,
+      topic,
+      details,
+      dateTime: slot.toISOString(),
+      durationMinutes: plan.durationMinutes,
       studentIds: selectedStudents.map((student) => student.id),
       studentNames: selectedStudents.map((student) => student.name),
       meetingProvider: normalizedMeetingProvider,
@@ -381,24 +424,36 @@ app.post("/api/classes", requireAuth("teacher"), handleAsync(async (req, res) =>
       autoMeetingId: autoMeeting ? autoMeeting.meetingId : "",
       zoomMeetingId: autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.meetingId : "",
       zoomStartUrl: autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.startUrl : "",
-      createdAt: new Date().toISOString()
-    };
+      createdAt
+    }));
 
-    database.classes.push(classItem);
+    database.classes.push(...classItems);
     await writeDatabase(database);
+
+    const classItem = classItems[0];
+    const count = classItems.length;
+    const baseMessage = count > 1
+      ? `Scheduled ${count} classes.`
+      : "Class scheduled successfully.";
+    const linkMessage = autoMeeting
+      ? ` Shared ${getMeetingProviderLabel(normalizedMeetingProvider)} class link created once for the series.`
+      : meetingLink
+        ? ` ${getMeetingProviderLabel(normalizedMeetingProvider)} class link saved and shared with students.`
+        : count === 1
+          ? " You can add a class link later if needed."
+          : " Add a class link later if needed.";
+
     res.status(201).json({
       classItem,
-      message: autoMeeting
-        ? `${getMeetingProviderLabel(normalizedMeetingProvider)} class link created and shared with students.`
-        : meetingLink
-          ? `${getMeetingProviderLabel(normalizedMeetingProvider)} class link saved and shared with students.`
-          : "Class scheduled successfully. You can add a class link later if needed."
+      classItems,
+      count,
+      message: `${baseMessage}${linkMessage}`
     });
   } catch (error) {
     const status = NOT_CONFIGURED_ERROR_CODES.has(error.code)
       ? 400
       : (error.statusCode || 502);
-    res.status(status).json({ error: error.message });
+    res.status(status).json({ error: error.message || "Could not schedule class." });
   }
 }));
 
@@ -714,16 +769,30 @@ app.put("/api/admin/users/:userId/activation", requireAuth("admin"), handleAsync
 }));
 
 app.use((error, _req, res, _next) => {
-  res.status(error.statusCode || 500).json({
-    error: error.message || "Something went wrong."
-  });
+  const status = error.statusCode || 500;
+  const safeMessage = status >= 500
+    ? "Something went wrong."
+    : (error.message || "Something went wrong.");
+  if (status >= 500) {
+    console.error(error);
+  }
+  res.status(status).json({ error: safeMessage });
 });
 
 if (require.main === module) {
+  if (IS_PRODUCTION && !SESSION_SECRET_ENV) {
+    console.warn("Warning: SESSION_SECRET is not set. Sessions may reset across redeploys.");
+  }
+  if (IS_PRODUCTION && !DATABASE_URL) {
+    console.warn("Warning: DATABASE_URL is not set. Production data may not persist on Vercel.");
+  }
+
   app.listen(PORT, () => {
     console.log(`Bowser portal running at http://localhost:${PORT}`);
   });
 }
+
+module.exports = app;
 
 function buildDashboard(user, database) {
   const students = database.users.filter((entry) => entry.role === "student");
@@ -1596,6 +1665,289 @@ function resolveSelectedStudents(database, studentIds) {
   }
 
   return students;
+}
+
+function clampText(value, maxLength) {
+  return String(value || "").trim().slice(0, maxLength);
+}
+
+function buildClassSchedulePlan(body) {
+  const scheduleMode = String(body.scheduleMode || "once").trim().toLowerCase();
+  const durationMinutes = Number(body.durationMinutes || 45);
+  if (!Number.isInteger(durationMinutes) || durationMinutes < 15 || durationMinutes > 180) {
+    throw createValidationError("Class duration must be between 15 and 180 minutes.");
+  }
+
+  const topic = clampText(body.topic, MAX_TOPIC_LENGTH);
+  const details = clampText(body.details, MAX_TEXT_LENGTH);
+  const driveLink = String(body.driveLink || "").trim();
+  const studentIds = body.studentIds;
+  const meetingProvider = body.meetingProvider;
+  const meetingMode = body.meetingMode;
+  const useAutoZoom = body.useAutoZoom;
+  const manualMeetingLink = String(body.manualMeetingLink || body.manualZoomLink || "").trim();
+
+  if (scheduleMode === "series" || scheduleMode === "recurring" || scheduleMode === "month") {
+    const slots = expandSeriesSlots(body);
+    if (!slots.length) {
+      throw createValidationError("No class dates match that schedule pattern. Adjust the range or days.");
+    }
+
+    if (slots.length > MAX_SERIES_CLASSES) {
+      throw createValidationError(`A series can create at most ${MAX_SERIES_CLASSES} classes. Narrow the date range or times.`);
+    }
+
+    return {
+      slots,
+      durationMinutes,
+      topic,
+      details,
+      driveLink,
+      studentIds,
+      meetingProvider,
+      meetingMode,
+      useAutoZoom,
+      manualMeetingLink
+    };
+  }
+
+  if (!body.dateTime) {
+    throw createValidationError("Class date and time are required.");
+  }
+
+  const scheduledDate = new Date(String(body.dateTime));
+  if (Number.isNaN(scheduledDate.getTime())) {
+    throw createValidationError("Please choose a valid class date and time.");
+  }
+
+  return {
+    slots: [scheduledDate],
+    durationMinutes,
+    topic,
+    details,
+    driveLink,
+    studentIds,
+    meetingProvider,
+    meetingMode,
+    useAutoZoom,
+    manualMeetingLink
+  };
+}
+
+function expandSeriesSlots(body) {
+  const startDateRaw = String(body.seriesStartDate || body.startDate || "").trim();
+  let endDateRaw = String(body.seriesEndDate || body.endDate || "").trim();
+  const pattern = String(body.seriesPattern || body.pattern || "weekdays").trim().toLowerCase();
+
+  if (!startDateRaw) {
+    throw createValidationError("Choose a start date for the class series.");
+  }
+
+  const startDate = parseLocalDateOnly(startDateRaw);
+  if (!startDate) {
+    throw createValidationError("Start date is invalid.");
+  }
+
+  if (!endDateRaw) {
+    // Default to the rest of the start month when teachers schedule a full month.
+    const monthEnd = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0, 12, 0, 0, 0);
+    endDateRaw = formatLocalDateOnly(monthEnd);
+  }
+
+  const endDate = parseLocalDateOnly(endDateRaw);
+  if (!endDate) {
+    throw createValidationError("End date is invalid.");
+  }
+
+  if (endDate < startDate) {
+    throw createValidationError("End date must be on or after the start date.");
+  }
+
+  const maxSpanMs = 62 * 24 * 60 * 60 * 1000;
+  if (endDate.getTime() - startDate.getTime() > maxSpanMs) {
+    throw createValidationError("Series range cannot be longer than about two months.");
+  }
+
+  const times = normalizeSeriesTimes(body);
+  const weekdays = normalizeSeriesWeekdays(body.seriesWeekdays || body.weekdays, pattern);
+  const slots = [];
+  const cursor = new Date(startDate);
+  let dayIndex = 0;
+
+  while (cursor <= endDate) {
+    const weekday = cursor.getDay();
+    let includeDay = false;
+
+    if (pattern === "daily" || pattern === "every-day") {
+      includeDay = true;
+    } else if (pattern === "alternate" || pattern === "every-other-day") {
+      includeDay = dayIndex % 2 === 0;
+    } else if (pattern === "weekdays" || pattern === "custom") {
+      includeDay = weekdays.includes(weekday);
+    } else {
+      throw createValidationError("Choose a valid schedule pattern: weekdays, daily, or alternate days.");
+    }
+
+    if (includeDay) {
+      for (const time of times) {
+        const [hours, minutes] = time.split(":").map(Number);
+        const slot = new Date(
+          cursor.getFullYear(),
+          cursor.getMonth(),
+          cursor.getDate(),
+          hours,
+          minutes,
+          0,
+          0
+        );
+        slots.push(slot);
+      }
+    }
+
+    cursor.setDate(cursor.getDate() + 1);
+    dayIndex += 1;
+  }
+
+  return slots;
+}
+
+function normalizeSeriesTimes(body) {
+  const rawTimes = Array.isArray(body.seriesTimes)
+    ? body.seriesTimes
+    : Array.isArray(body.times)
+      ? body.times
+      : [];
+
+  let times = rawTimes
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean)
+    .map(normalizeTimeValue);
+
+  if (!times.length && body.dateTime) {
+    const fromDateTime = new Date(String(body.dateTime));
+    if (!Number.isNaN(fromDateTime.getTime())) {
+      times = [
+        `${String(fromDateTime.getHours()).padStart(2, "0")}:${String(fromDateTime.getMinutes()).padStart(2, "0")}`
+      ];
+    }
+  }
+
+  if (!times.length && body.seriesTime) {
+    times = [normalizeTimeValue(body.seriesTime)];
+  }
+
+  if (!times.length) {
+    throw createValidationError("Add at least one class time for the series.");
+  }
+
+  if (times.length > 6) {
+    throw createValidationError("You can set up to 6 class times per day.");
+  }
+
+  return [...new Set(times)].sort();
+}
+
+function normalizeTimeValue(value) {
+  const match = String(value || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    throw createValidationError("Class times must use HH:MM format, for example 16:00.");
+  }
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    throw createValidationError("Class times must use a valid 24-hour clock time.");
+  }
+
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function normalizeSeriesWeekdays(rawWeekdays, pattern) {
+  if (pattern === "daily" || pattern === "every-day" || pattern === "alternate" || pattern === "every-other-day") {
+    return [];
+  }
+
+  const source = Array.isArray(rawWeekdays) && rawWeekdays.length
+    ? rawWeekdays
+    : [1, 2, 3, 4, 5]; // Mon–Fri default
+
+  const weekdays = [...new Set(source.map((entry) => Number(entry)).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))];
+  if (!weekdays.length) {
+    throw createValidationError("Select at least one weekday for the series.");
+  }
+
+  return weekdays;
+}
+
+function parseLocalDateOnly(value) {
+  const match = String(value || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(year, month - 1, day, 12, 0, 0, 0);
+  if (
+    Number.isNaN(parsed.getTime()) ||
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function formatLocalDateOnly(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function getClientRateKey(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.ip || req.socket.remoteAddress || "unknown";
+}
+
+function isRateLimited(key) {
+  pruneLoginAttempts();
+  const entry = loginAttemptTracker.get(key);
+  if (!entry) {
+    return false;
+  }
+
+  return entry.count >= LOGIN_RATE_MAX_ATTEMPTS && entry.resetAt > Date.now();
+}
+
+function registerFailedLogin(key) {
+  pruneLoginAttempts();
+  const now = Date.now();
+  const entry = loginAttemptTracker.get(key);
+  if (!entry || entry.resetAt <= now) {
+    loginAttemptTracker.set(key, { count: 1, resetAt: now + LOGIN_RATE_WINDOW_MS });
+    return;
+  }
+
+  entry.count += 1;
+  loginAttemptTracker.set(key, entry);
+}
+
+function clearFailedLogins(key) {
+  loginAttemptTracker.delete(key);
+}
+
+function pruneLoginAttempts() {
+  const now = Date.now();
+  for (const [key, entry] of loginAttemptTracker.entries()) {
+    if (entry.resetAt <= now) {
+      loginAttemptTracker.delete(key);
+    }
+  }
 }
 
 function createValidationError(message) {

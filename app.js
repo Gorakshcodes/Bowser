@@ -30,7 +30,10 @@
     selectedCalendarStudentId: "all",
     activeMeetingEditorId: null,
     selectedClassId: null,
-    isEditingClass: false
+    isEditingClass: false,
+    scheduleMode: "once",
+    seriesPattern: "weekdays",
+    seriesTimes: ["16:00"]
   };
 
   initialize();
@@ -78,35 +81,23 @@
   function renderLogin() {
     return `
       <section class="welcome-shell">
-        <div class="welcome-copy welcome-copy--centered">
-          <div class="welcome-mark" aria-hidden="true">
-            <div class="welcome-mark__halo"></div>
-            <div class="welcome-mark__core">
-              <span class="welcome-mark__mind"></span>
-              <span class="welcome-mark__dragon">
-                <span class="welcome-mark__dragon-wing welcome-mark__dragon-wing--left"></span>
-                <span class="welcome-mark__dragon-wing welcome-mark__dragon-wing--right"></span>
-                <span class="welcome-mark__dragon-head"></span>
-                <span class="welcome-mark__dragon-eye"></span>
-              </span>
-              <span class="welcome-mark__letter">B</span>
-            </div>
-          </div>
+        <div class="welcome-copy">
+          <div class="brand-mark" aria-hidden="true">B</div>
           <span class="eyebrow">Bowser</span>
-          <h1>Learning Workspace</h1>
-          <p class="panel-subtitle">Sign in to manage classes, schedules, and homework.</p>
+          <h1>Learning Portal</h1>
+          <p class="panel-subtitle">Classes, schedules, and homework in one calm place.</p>
           <div class="role-switch" aria-label="Choose account type">
             <button class="role-card ${state.authRole === "teacher" ? "is-active" : ""}" type="button" data-action="set-auth-role" data-role="teacher">
               <strong>Teacher</strong>
-              <span>Classes, schedules, feedback</span>
+              <span>Schedule & review</span>
             </button>
             <button class="role-card ${state.authRole === "student" ? "is-active" : ""}" type="button" data-action="set-auth-role" data-role="student">
-              <strong>Student</strong>
-              <span>Classes, joins, homework</span>
+              <strong>Kid</strong>
+              <span>Join & homework</span>
             </button>
             <button class="role-card ${state.authRole === "admin" ? "is-active" : ""}" type="button" data-action="set-auth-role" data-role="admin">
               <strong>Admin</strong>
-              <span>Approve and manage accounts</span>
+              <span>Accounts</span>
             </button>
           </div>
         </div>
@@ -116,15 +107,13 @@
             <button class="btn ${state.authMode === "login" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="login">Login</button>
             ${state.authRole === "admin"
               ? ""
-              : `<button class="btn ${state.authMode === "register" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="register">Create Account</button>`}
+              : `<button class="btn ${state.authMode === "register" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="register">Sign up</button>`}
           </div>
-          <h2 class="panel-title">${state.authMode === "register" ? `Create ${getAuthRoleLabel()} account` : `Login as ${getAuthRoleLabel()}`}</h2>
+          <h2 class="panel-title">${state.authMode === "register" ? `Create ${getAuthRoleLabel()} account` : `${getAuthRoleLabel()} login`}</h2>
           <p class="panel-subtitle">
             ${state.authMode === "register"
-              ? `Set up a ${state.authRole} account to enter the learning app.`
-              : state.authRole === "admin"
-                ? "Use the admin email and password to approve teacher and student accounts."
-                : `Use your ${state.authRole} email and password to continue.`}
+              ? "New accounts need admin approval before login."
+              : "Use your email and password to continue."}
           </p>
           ${state.authMode === "register" && state.authRole !== "admin" ? renderRegisterForm() : renderLoginForm()}
           ${renderMessage()}
@@ -135,42 +124,43 @@
 
   function renderLoginForm() {
     return `
-      <form class="form-grid" data-form="login">
+      <form class="form-grid" data-form="login" autocomplete="on">
         <input name="role" type="hidden" value="${escapeAttribute(state.authRole)}">
         <div class="field">
           <label for="login-email">Email</label>
-          <input id="login-email" name="email" type="email" placeholder="${getAuthEmailPlaceholder()}" required>
+          <input id="login-email" name="email" type="email" placeholder="${getAuthEmailPlaceholder()}" required autocomplete="username">
         </div>
         <div class="field">
           <label for="login-password">Password</label>
-          <input id="login-password" name="password" type="password" placeholder="Enter your password" required>
+          <input id="login-password" name="password" type="password" placeholder="Your password" required autocomplete="current-password">
         </div>
-        <button class="btn primary" type="submit">Enter Portal</button>
+        <button class="btn primary" type="submit">Sign in</button>
       </form>
     `;
   }
 
   function renderRegisterForm() {
     return `
-      <form class="form-grid" data-form="register">
+      <form class="form-grid" data-form="register" autocomplete="on">
         <input name="role" type="hidden" value="${escapeAttribute(state.authRole)}">
         <div class="field">
-          <label for="register-name">${state.authRole === "student" ? "Student Name" : "Teacher Name"}</label>
-          <input id="register-name" name="name" type="text" placeholder="${state.authRole === "student" ? "Enter student name" : "Enter teacher name"}" required>
+          <label for="register-name">${state.authRole === "student" ? "Kid's name" : "Teacher name"}</label>
+          <input id="register-name" name="name" type="text" maxlength="80" placeholder="${state.authRole === "student" ? "e.g. Diya" : "Your name"}" required>
         </div>
         <div class="field" ${state.authRole === "teacher" ? "" : "hidden"}>
           <label for="register-subject">Subject</label>
-          <input id="register-subject" name="subject" type="text" placeholder="Example: Maths">
+          <input id="register-subject" name="subject" type="text" maxlength="80" placeholder="e.g. Maths">
         </div>
         <div class="field">
           <label for="register-email">Email</label>
-          <input id="register-email" name="email" type="email" placeholder="Enter your email" required>
+          <input id="register-email" name="email" type="email" maxlength="254" placeholder="email@example.com" required autocomplete="email">
         </div>
         <div class="field">
           <label for="register-password">Password</label>
-          <input id="register-password" name="password" type="password" placeholder="Create a password" required>
+          <input id="register-password" name="password" type="password" minlength="8" maxlength="128" placeholder="At least 8 characters" required autocomplete="new-password">
+          <div class="field-hint">Use at least 8 characters.</div>
         </div>
-        <button class="btn primary" type="submit">Create Account</button>
+        <button class="btn primary" type="submit">Create account</button>
       </form>
     `;
   }
@@ -192,52 +182,35 @@
       ? (editingClass.meetingLink || editingClass.zoomLink || "")
       : "";
     const formStudentId = editingClass ? getPrimaryStudentId(editingClass) : "";
-    const formButtonLabel = editingClass ? "Save Changes" : "Save Class";
-    const formTitle = editingClass ? "Edit Class" : "Schedule Class";
+    const formButtonLabel = editingClass
+      ? "Save changes"
+      : state.scheduleMode === "series"
+        ? "Schedule series"
+        : "Schedule class";
+    const formTitle = editingClass ? "Edit class" : "Schedule class";
     const formIntro = editingClass
-      ? "Update the class details here. Date, time, kid, and class link can all be changed from this form."
-      : "Date, time, and student name are required. Zoom link, topic, notes, and Drive link are optional.";
+      ? "Update this class only. Series patterns apply when creating new classes."
+      : "Pick a kid, time, and optional link — or schedule a whole month in one go.";
 
     return `
       <section class="surface">
         <div class="dashboard-header">
           <div>
-            <span class="eyebrow">Teacher Portal</span>
-            <h2 class="panel-title">${escapeHtml(state.user.name)}</h2>
-            <p class="panel-subtitle">Manage classes for ${escapeHtml(state.user.subject || "your subject")} with a clear class view and a separate homework workspace.</p>
+            <span class="eyebrow">${escapeHtml(state.user.subject || "Teacher")}</span>
+            <h2 class="panel-title">Hi, ${escapeHtml(state.user.name)}</h2>
+            <p class="panel-subtitle">${teacherClasses.length} classes · ${state.students.length} kids · ${reviewedCount} homework reviewed</p>
           </div>
           <div class="dashboard-actions">
-            <span class="mini-stat">${teacherClasses.length} classes</span>
-            <span class="mini-stat">${state.students.length} students</span>
-            <span class="mini-stat">${reviewedCount} reviewed</span>
             <button class="btn ghost" type="button" data-action="logout">Logout</button>
           </div>
         </div>
         ${renderDashboardTabs()}
         ${state.dashboardTab === "meetings" ? `
-          <div class="summary-strip">
-            <article class="summary-card">
-              <span>Classes in view</span>
-              <strong>${visibleCalendarClasses.length}</strong>
-              <small>${selectedKid ? `${escapeHtml(selectedKid.name)} selected` : "All students"}</small>
-            </article>
-            <article class="summary-card">
-              <span>Total classes</span>
-              <strong>${teacherClasses.length}</strong>
-              <small>Saved in the app</small>
-            </article>
-            <article class="summary-card">
-              <span>Students</span>
-              <strong>${state.students.length}</strong>
-              <small>Available to assign</small>
-            </article>
-          </div>
-
           <section class="card calendar-card">
             <div class="calendar-header">
               <div>
-                <h3>Class Calendar</h3>
-                <p>Switch between week and month views and filter the class calendar by student name.</p>
+                <h3>Calendar</h3>
+                <p class="panel-subtitle">${selectedKid ? `Showing ${escapeHtml(selectedKid.name)}` : "All kids"} · ${visibleCalendarClasses.length} in view</p>
               </div>
             </div>
             ${renderCalendarControls({
@@ -261,37 +234,27 @@
                 })}
 
             <section class="card">
-              <h3>Upcoming Classes</h3>
-              <p>Only current and future classes appear here for easy follow-up.</p>
+              <div class="section-heading">
+                <div>
+                  <h3>Upcoming</h3>
+                  <p class="panel-subtitle">Next classes at a glance</p>
+                </div>
+              </div>
               <div class="section-stack">
-                ${upcomingTeacherClasses.length ? upcomingTeacherClasses.map(renderTeacherClassCard).join("") : renderEmptyState("No upcoming classes", "Current and future classes will appear here after you schedule them.")}
+                ${upcomingTeacherClasses.length ? upcomingTeacherClasses.slice(0, 8).map(renderTeacherClassCard).join("") : renderEmptyState("No upcoming classes", "Schedule a class or a monthly series to fill this list.")}
               </div>
             </section>
           </div>
         ` : `
-          <div class="summary-strip">
-            <article class="summary-card">
-              <span>Homework received</span>
-              <strong>${teacherSubmissions.length}</strong>
-              <small>Uploads from students</small>
-            </article>
-            <article class="summary-card">
-              <span>Reviewed</span>
-              <strong>${reviewedCount}</strong>
-              <small>Already scored</small>
-            </article>
-            <article class="summary-card">
-              <span>Pending</span>
-              <strong>${teacherSubmissions.length - reviewedCount}</strong>
-              <small>Waiting for review</small>
-            </article>
-          </div>
-
           <section class="card">
-            <h3>Homework Review</h3>
-            <p>Open student uploads, add a score, and leave quick feedback.</p>
+            <div class="section-heading">
+              <div>
+                <h3>Homework</h3>
+                <p class="panel-subtitle">${teacherSubmissions.length - reviewedCount} waiting · ${reviewedCount} reviewed</p>
+              </div>
+            </div>
             <div class="section-stack">
-              ${teacherSubmissions.length ? teacherSubmissions.map(renderTeacherSubmissionCard).join("") : renderEmptyState("No homework uploaded yet", "Student homework photos will appear here after they submit from the app.")}
+              ${teacherSubmissions.length ? teacherSubmissions.map(renderTeacherSubmissionCard).join("") : renderEmptyState("No homework yet", "Student uploads will show up here.")}
             </div>
           </section>
         `}
@@ -305,47 +268,50 @@
     const upcomingClasses = classes.filter(isCurrentOrUpcomingClass);
     const submissions = [...state.submissions].sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
     const calendarClasses = getFilteredCalendarClasses(classes);
-    const visibleCalendarClasses = getCalendarWindowClasses(calendarClasses);
+    const nextClass = upcomingClasses[0] || null;
+    const stars = submissions.filter((submission) => submission.score).length;
 
     return `
-      <section class="surface">
-        <div class="dashboard-header">
+      <section class="surface kid-shell">
+        <div class="dashboard-header kid-header">
           <div>
-            <span class="eyebrow">Student Portal</span>
+            <span class="eyebrow kid-eyebrow">Hi there 👋</span>
             <h2 class="panel-title">${escapeHtml(state.user.name)}</h2>
-            <p class="panel-subtitle">See your classes in week or month view, join online classes, and keep homework in its own tab.</p>
+            <p class="panel-subtitle">Your classes and homework live here.</p>
           </div>
           <div class="dashboard-actions">
-            <span class="mini-stat">${classes.length} classes</span>
-            <span class="mini-stat">${submissions.length} uploads</span>
+            <span class="kid-chip">📚 ${classes.length} classes</span>
+            <span class="kid-chip">⭐ ${stars} stars</span>
             <button class="btn ghost" type="button" data-action="logout">Logout</button>
           </div>
         </div>
-        ${renderDashboardTabs()}
+        ${renderDashboardTabs({ kid: true })}
         ${state.dashboardTab === "meetings" ? `
-          <div class="summary-strip">
-            <article class="summary-card">
-              <span>Classes in view</span>
-              <strong>${visibleCalendarClasses.length}</strong>
-              <small>${escapeHtml(state.calendarView === "month" ? "Month view" : "Week view")}</small>
-            </article>
-            <article class="summary-card">
-              <span>Total classes</span>
-              <strong>${classes.length}</strong>
-              <small>Assigned to you</small>
-            </article>
-            <article class="summary-card">
-              <span>Reviewed homework</span>
-              <strong>${submissions.filter((submission) => submission.score).length}</strong>
-              <small>Results from your teacher</small>
-            </article>
-          </div>
+          ${nextClass ? `
+            <section class="card kid-hero-card">
+              <div class="kid-hero">
+                <div>
+                  <span class="kid-label">Next class</span>
+                  <h3>${escapeHtml(getClassTitle(nextClass))}</h3>
+                  <p>${escapeHtml(formatDate(nextClass.dateTime))} · with ${escapeHtml(nextClass.teacherName || "your teacher")}</p>
+                </div>
+                <div class="kid-hero-actions">
+                  ${renderExternalAction(
+                    getClassMeetingLink(nextClass),
+                    "primary kid-join",
+                    "Join class 🚀",
+                    "Link coming soon"
+                  )}
+                </div>
+              </div>
+            </section>
+          ` : renderEmptyState("No classes yet", "When your teacher schedules a class, it will show up here.")}
 
-          <section class="card calendar-card">
+          <section class="card calendar-card kid-calendar">
             <div class="calendar-header">
               <div>
-                <h3>Class Calendar</h3>
-                <p>Use week view for the next few classes or month view to see the full class schedule.</p>
+                <h3>My calendar</h3>
+                <p class="panel-subtitle">See what’s coming this week or month</p>
               </div>
             </div>
             ${renderCalendarControls({
@@ -356,27 +322,26 @@
           </section>
 
           <section class="card">
-            <h3>Upcoming Classes</h3>
-            <p>Use Join Class to open current and future classes when your teacher has shared the link.</p>
-            <div class="section-stack">
-              ${upcomingClasses.length ? upcomingClasses.map(renderStudentClassCard).join("") : renderEmptyState("No upcoming classes", "Current and future classes will appear here after your teacher assigns them.")}
+            <h3>Coming up</h3>
+            <div class="section-stack kid-class-list">
+              ${upcomingClasses.length ? upcomingClasses.map(renderStudentClassCard).join("") : renderEmptyState("Nothing scheduled", "Enjoy the free time — or check back soon!")}
             </div>
           </section>
         ` : `
           <div class="dashboard-columns">
-            <section class="card">
-              <h3>Upload Homework</h3>
-              <p>Choose a class, upload the homework photo, and send it to your teacher.</p>
+            <section class="card kid-card">
+              <h3>Send homework 📸</h3>
+              <p class="panel-subtitle">Snap a photo or pick one from your gallery.</p>
               <div class="section-stack">
-                ${classes.length ? classes.map(renderStudentHomeworkCard).join("") : renderEmptyState("No classes available", "Homework upload will appear here after a class is scheduled for you.")}
+                ${classes.length ? classes.map(renderStudentHomeworkCard).join("") : renderEmptyState("No classes yet", "Homework unlocks after a class is scheduled.")}
               </div>
             </section>
 
-            <section class="card">
-              <h3>Homework Status</h3>
-              <p>See uploaded work, scores, and teacher comments in one place.</p>
+            <section class="card kid-card">
+              <h3>My results 🌟</h3>
+              <p class="panel-subtitle">Scores and teacher notes</p>
               <div class="section-stack">
-                ${submissions.length ? submissions.map(renderStudentSubmissionCard).join("") : renderEmptyState("No homework uploaded yet", "Upload homework from the left side once a class is scheduled.")}
+                ${submissions.length ? submissions.map(renderStudentSubmissionCard).join("") : renderEmptyState("No uploads yet", "Send a homework photo to see feedback here.")}
               </div>
             </section>
           </div>
@@ -449,67 +414,156 @@
 
   function renderTeacherClassFormPanel({ editingClass, formMeetingMode, formManualLink, formStudentId, formButtonLabel, formTitle, formIntro }) {
     const manualLinkCopy = getManualLinkCopy(getMeetingOptionProvider(formMeetingMode));
+    const isSeries = !editingClass && state.scheduleMode === "series";
+    const monthBounds = getDefaultSeriesMonthBounds();
+    const weekdayOptions = [
+      { value: "1", label: "Mon" },
+      { value: "2", label: "Tue" },
+      { value: "3", label: "Wed" },
+      { value: "4", label: "Thu" },
+      { value: "5", label: "Fri" },
+      { value: "6", label: "Sat" },
+      { value: "0", label: "Sun" }
+    ];
+    const defaultWeekdays = new Set(["1", "2", "3", "4", "5"]);
+
     return `
       <section class="card">
         <div class="section-heading">
           <div>
             <h3>${formTitle}</h3>
-            <p>${formIntro}</p>
+            <p class="panel-subtitle">${formIntro}</p>
           </div>
-          ${editingClass ? '<button class="btn ghost" type="button" data-action="cancel-class-edit">Back to Details</button>' : ""}
+          ${editingClass ? '<button class="btn ghost" type="button" data-action="cancel-class-edit">Back</button>' : ""}
         </div>
         <form class="form-grid" data-form="schedule-class">
           <div class="field">
-            <label for="studentIds">Kid for this class</label>
+            <label for="studentIds">Kid</label>
             <select id="studentIds" name="studentIds" ${state.students.length ? "required" : "disabled"}>
-              <option value="">${state.students.length ? "Select kid name" : "No student accounts yet"}</option>
+              <option value="">${state.students.length ? "Select kid" : "No kids yet"}</option>
               ${state.students.map((student) => `
                 <option value="${escapeAttribute(student.id)}"${formStudentId === student.id ? " selected" : ""}>${escapeHtml(student.name)}</option>
               `).join("")}
             </select>
-            ${state.students.length ? '<div class="field-hint">Choose the kid who should see this class in their account.</div>' : '<p class="calendar-empty">Create the student accounts first so you can assign classes.</p>'}
+            ${state.students.length ? "" : '<p class="calendar-empty">Create and activate student accounts first.</p>'}
           </div>
-          <div class="form-grid two">
+
+          ${editingClass ? "" : `
             <div class="field">
-              <label for="dateTime">Class Date & Time</label>
-              <input id="dateTime" name="dateTime" type="datetime-local" value="${escapeAttribute(editingClass ? formatDateTimeLocalInput(editingClass.dateTime) : "")}" required>
+              <label>When</label>
+              <div class="segmented" role="group" aria-label="Schedule type">
+                <button class="segmented__btn ${state.scheduleMode === "once" ? "is-active" : ""}" type="button" data-action="set-schedule-mode" data-mode="once">One class</button>
+                <button class="segmented__btn ${state.scheduleMode === "series" ? "is-active" : ""}" type="button" data-action="set-schedule-mode" data-mode="series">Month series</button>
+              </div>
+            </div>
+          `}
+
+          ${isSeries ? `
+            <div class="form-grid two">
+              <div class="field">
+                <label for="seriesStartDate">From</label>
+                <input id="seriesStartDate" name="seriesStartDate" type="date" value="${escapeAttribute(monthBounds.start)}" required>
+              </div>
+              <div class="field">
+                <label for="seriesEndDate">To</label>
+                <input id="seriesEndDate" name="seriesEndDate" type="date" value="${escapeAttribute(monthBounds.end)}" required>
+              </div>
+            </div>
+            <div class="field">
+              <label for="seriesPattern">Pattern</label>
+              <select id="seriesPattern" name="seriesPattern" data-series-pattern>
+                <option value="weekdays"${state.seriesPattern === "weekdays" ? " selected" : ""}>Selected weekdays</option>
+                <option value="alternate"${state.seriesPattern === "alternate" ? " selected" : ""}>Alternate days</option>
+                <option value="daily"${state.seriesPattern === "daily" ? " selected" : ""}>Every day</option>
+              </select>
+              <div class="field-hint">Alternate days = every other day from the start date. Weekdays lets you pick Mon–Sun.</div>
+            </div>
+            <div class="field" data-weekday-field ${state.seriesPattern === "weekdays" ? "" : "hidden"}>
+              <label>Days</label>
+              <div class="weekday-grid">
+                ${weekdayOptions.map((day) => `
+                  <label class="check-chip check-chip--compact">
+                    <input type="checkbox" name="seriesWeekdays" value="${day.value}"${defaultWeekdays.has(day.value) ? " checked" : ""}>
+                    <span>${day.label}</span>
+                  </label>
+                `).join("")}
+              </div>
+            </div>
+            <div class="field">
+              <label>Times each day</label>
+              <div class="times-list" data-series-times>
+                ${state.seriesTimes.map((time, index) => `
+                  <div class="time-row">
+                    <input name="seriesTimes" type="time" value="${escapeAttribute(time)}" required>
+                    ${state.seriesTimes.length > 1
+                      ? `<button class="btn ghost btn-icon" type="button" data-action="remove-series-time" data-index="${index}" aria-label="Remove time">×</button>`
+                      : ""}
+                  </div>
+                `).join("")}
+              </div>
+              ${state.seriesTimes.length < 6
+                ? '<button class="btn secondary" type="button" data-action="add-series-time">+ Add another time</button>'
+                : ""}
+              <div class="field-hint">Example: 10:00 and 16:00 for twice a day, or three times for three slots.</div>
             </div>
             <div class="field">
               <label for="durationMinutes">Duration</label>
               <select id="durationMinutes" name="durationMinutes">
-                <option value="30"${editingClass && Number(editingClass.durationMinutes) === 30 ? " selected" : ""}>30 minutes</option>
-                <option value="45"${!editingClass || Number(editingClass.durationMinutes) === 45 ? " selected" : ""}>45 minutes</option>
-                <option value="60"${editingClass && Number(editingClass.durationMinutes) === 60 ? " selected" : ""}>60 minutes</option>
-                <option value="90"${editingClass && Number(editingClass.durationMinutes) === 90 ? " selected" : ""}>90 minutes</option>
+                <option value="30">30 minutes</option>
+                <option value="45" selected>45 minutes</option>
+                <option value="60">60 minutes</option>
+                <option value="90">90 minutes</option>
               </select>
             </div>
-          </div>
+          ` : `
+            <div class="form-grid two">
+              <div class="field">
+                <label for="dateTime">Date & time</label>
+                <input id="dateTime" name="dateTime" type="datetime-local" value="${escapeAttribute(editingClass ? formatDateTimeLocalInput(editingClass.dateTime) : "")}" required>
+              </div>
+              <div class="field">
+                <label for="durationMinutes">Duration</label>
+                <select id="durationMinutes" name="durationMinutes">
+                  <option value="30"${editingClass && Number(editingClass.durationMinutes) === 30 ? " selected" : ""}>30 minutes</option>
+                  <option value="45"${!editingClass || Number(editingClass.durationMinutes) === 45 ? " selected" : ""}>45 minutes</option>
+                  <option value="60"${editingClass && Number(editingClass.durationMinutes) === 60 ? " selected" : ""}>60 minutes</option>
+                  <option value="90"${editingClass && Number(editingClass.durationMinutes) === 90 ? " selected" : ""}>90 minutes</option>
+                </select>
+              </div>
+            </div>
+          `}
+
           <div class="field">
-            <label for="scheduleMeetingMode">Class Link</label>
+            <label for="scheduleMeetingMode">Class link</label>
             <select id="scheduleMeetingMode" name="meetingMode">
               ${getMeetingOptions().map((option) => `
                 <option value="${escapeAttribute(option.value)}"${formMeetingMode === option.value ? " selected" : ""}>${escapeHtml(option.label)}</option>
               `).join("")}
             </select>
-            <div class="field-hint">${escapeHtml(getMeetingModeHint())}</div>
+            <div class="field-hint">${escapeHtml(isSeries ? "One shared link is used for the whole series." : getMeetingModeHint())}</div>
           </div>
           <div class="field" data-manual-zoom-field ${isManualMeetingOption(formMeetingMode) ? "" : "hidden"}>
             <label for="manualMeetingLink" data-manual-link-label>${escapeHtml(manualLinkCopy.label)}</label>
             <input id="manualMeetingLink" name="manualMeetingLink" type="text" value="${escapeAttribute(formManualLink)}" placeholder="${escapeAttribute(manualLinkCopy.placeholder)}" data-manual-link-input>
             <div class="field-hint" data-manual-link-hint>${escapeHtml(manualLinkCopy.hint)}</div>
           </div>
-          <div class="field">
-            <label for="topic">Topic</label>
-            <input id="topic" name="topic" type="text" value="${escapeAttribute(editingClass ? (editingClass.topic || "") : "")}" placeholder="Optional class title">
-          </div>
-          <div class="field">
-            <label for="details">Notes</label>
-            <textarea id="details" name="details" placeholder="Optional notes for the class">${escapeHtml(editingClass ? (editingClass.details || "") : "")}</textarea>
-          </div>
-          <div class="field">
-            <label for="driveLink">Google Drive Link</label>
-            <input id="driveLink" name="driveLink" type="url" value="${escapeAttribute(editingClass ? (editingClass.driveLink || "") : "")}" placeholder="Optional: https://drive.google.com/...">
-          </div>
+          <details class="optional-block">
+            <summary>Optional details</summary>
+            <div class="form-grid optional-block__body">
+              <div class="field">
+                <label for="topic">Topic</label>
+                <input id="topic" name="topic" type="text" maxlength="200" value="${escapeAttribute(editingClass ? (editingClass.topic || "") : "")}" placeholder="Optional title">
+              </div>
+              <div class="field">
+                <label for="details">Notes</label>
+                <textarea id="details" name="details" maxlength="2000" placeholder="Optional notes">${escapeHtml(editingClass ? (editingClass.details || "") : "")}</textarea>
+              </div>
+              <div class="field">
+                <label for="driveLink">Drive link</label>
+                <input id="driveLink" name="driveLink" type="url" value="${escapeAttribute(editingClass ? (editingClass.driveLink || "") : "")}" placeholder="https://drive.google.com/...">
+              </div>
+            </div>
+          </details>
           <div class="form-actions">
             <button class="btn primary" type="submit">${formButtonLabel}</button>
             ${editingClass ? `<span class="field-hint">Editing: ${escapeHtml(getClassTitle(editingClass))}</span>` : ""}
@@ -528,31 +582,27 @@
       <section class="card class-panel">
         <div class="section-heading">
           <div>
-            <h3>Class Details</h3>
-            <p>Review the selected class information here, then switch to edit mode if something needs to change.</p>
+            <h3>${escapeHtml(getClassTitle(classItem))}</h3>
+            <p class="panel-subtitle">${escapeHtml(formatDate(classItem.dateTime))}</p>
           </div>
           <div class="panel-actions">
-            <button class="btn primary" type="button" data-action="start-class-edit">Edit Class</button>
-            <button class="btn ghost" type="button" data-action="clear-class-selection">New Class</button>
+            <button class="btn primary" type="button" data-action="start-class-edit">Edit</button>
+            <button class="btn ghost" type="button" data-action="clear-class-selection">New</button>
           </div>
         </div>
         <div class="class-detail-block">
-          <span class="subject-pill ${escapeAttribute(String(classItem.subject || "class").toLowerCase())}">${escapeHtml(classItem.subject || "Class")}</span>
-          <h3>${escapeHtml(getClassTitle(classItem))}</h3>
-          ${renderClassDetails(classItem.details)}
           ${renderKidBadges(classItem)}
+          ${renderClassDetails(classItem.details)}
         </div>
         <div class="detail-list">
-          <span><strong>Date:</strong> ${escapeHtml(formatDate(classItem.dateTime))}</span>
-          <span><strong>Duration:</strong> ${escapeHtml(String(classItem.durationMinutes || 45))} minutes</span>
-          <span><strong>Kid:</strong> ${escapeHtml(formatStudentNames(classItem.studentNames))}</span>
-          <span><strong>Class Type:</strong> ${escapeHtml(getMeetingProviderLabel(meetingProvider))}</span>
-          <span><strong>Class Link:</strong> ${escapeHtml(getReadableMeetingLink(classItem))}</span>
-          ${classItem.driveLink ? `<span><strong>Drive:</strong> ${escapeHtml(classItem.driveLink)}</span>` : ""}
+          <span><strong>Duration</strong> ${escapeHtml(String(classItem.durationMinutes || 45))} min</span>
+          <span><strong>Link</strong> ${escapeHtml(getMeetingProviderLabel(meetingProvider))}</span>
+          ${classItem.driveLink ? `<span><strong>Drive</strong> ready</span>` : ""}
         </div>
         <div class="class-actions">
-          ${renderExternalAction(meetingLink, "primary", getMeetingActionLabel(meetingProvider, "teacher"), getMeetingUnavailableLabel(meetingProvider))}
-          ${renderExternalAction(driveLink, "secondary", "Open Drive Doc", "Drive link unavailable")}
+          ${renderExternalAction(meetingLink, "primary", "Join", getMeetingUnavailableLabel(meetingProvider))}
+          ${driveLink ? renderExternalAction(driveLink, "secondary", "Drive", "Drive unavailable") : ""}
+          ${meetingLink ? `<button class="btn ghost" type="button" data-action="copy-link" data-link="${escapeAttribute(meetingLink)}">Copy link</button>` : ""}
         </div>
       </section>
     `;
@@ -561,34 +611,20 @@
   function renderTeacherClassCard(classItem) {
     const meetingProvider = getClassMeetingProvider(classItem);
     const meetingLink = getClassMeetingLink(classItem);
-    const driveLink = safeExternalUrl(classItem.driveLink);
-    const meetingStatus = getMeetingStatus(classItem, meetingProvider);
 
     return `
-      <article class="card">
-      <article class="card${state.selectedClassId === classItem.id ? " is-selected" : ""}">
+      <article class="card card--compact${state.selectedClassId === classItem.id ? " is-selected" : ""}">
         <div class="card__top">
-          <span class="subject-pill ${escapeAttribute(String(classItem.subject || "class").toLowerCase())}">${escapeHtml(classItem.subject || "Class")}</span>
-          <span class="status-pill">${formatDate(classItem.dateTime)}</span>
+          <h3>${escapeHtml(getClassTitle(classItem))}</h3>
+          <span class="status-pill">${escapeHtml(formatDate(classItem.dateTime))}</span>
         </div>
-        <h3>${escapeHtml(getClassTitle(classItem))}</h3>
-        ${renderClassDetails(classItem.details)}
         ${renderKidBadges(classItem)}
-        <div class="meeting-status">
-          <span class="meeting-pill ${meetingStatus.tone}">${escapeHtml(meetingStatus.label)}</span>
-          ${meetingLink ? `<button class="link-btn ghost copy-link" type="button" data-action="copy-link" data-link="${escapeAttribute(meetingLink)}">Copy link</button>` : ""}
-        </div>
         <div class="card__meta">
-          <span><strong>Duration:</strong> ${escapeHtml(String(classItem.durationMinutes || 45))} minutes</span>
-          <span><strong>Kids:</strong> ${escapeHtml(formatStudentNames(classItem.studentNames))}</span>
-          <span><strong>Class Type:</strong> ${escapeHtml(getMeetingProviderLabel(meetingProvider))}</span>
-          ${classItem.driveLink ? `<span><strong>Drive:</strong> ${escapeHtml(classItem.driveLink)}</span>` : ""}
-          <span class="meeting-link"><strong>Class Link:</strong> ${escapeHtml(getReadableMeetingLink(classItem))}</span>
+          <span>${escapeHtml(String(classItem.durationMinutes || 45))} min · ${escapeHtml(getMeetingProviderLabel(meetingProvider))}</span>
         </div>
         <div class="class-actions">
-          ${renderExternalAction(meetingLink, "primary", getMeetingActionLabel(meetingProvider, "teacher"), getMeetingUnavailableLabel(meetingProvider))}
-          ${renderExternalAction(driveLink, "secondary", "Open Drive Doc", "Drive link unavailable")}
-          <button class="btn ghost" type="button" data-action="edit-class" data-class-id="${escapeAttribute(classItem.id)}">View Details</button>
+          ${renderExternalAction(meetingLink, "primary", "Join", getMeetingUnavailableLabel(meetingProvider))}
+          <button class="btn ghost" type="button" data-action="edit-class" data-class-id="${escapeAttribute(classItem.id)}">Open</button>
         </div>
       </article>
     `;
@@ -599,29 +635,21 @@
     const meetingProvider = getClassMeetingProvider(classItem);
     const meetingLink = getClassMeetingLink(classItem);
     const driveLink = safeExternalUrl(classItem.driveLink);
-    const meetingStatus = getMeetingStatus(classItem, meetingProvider);
     return `
-      <article class="card">
+      <article class="card kid-class-card">
         <div class="card__top">
-          <span class="subject-pill ${escapeAttribute(String(classItem.subject || "class").toLowerCase())}">${escapeHtml(classItem.subject || "Class")}</span>
-          <span class="status-pill">${formatDate(classItem.dateTime)}</span>
-        </div>
-        <h3>${escapeHtml(getClassTitle(classItem))}</h3>
-        ${renderClassDetails(classItem.details)}
-        ${renderKidBadges(classItem)}
-        <div class="meeting-status">
-          <span class="meeting-pill ${meetingStatus.tone}">${escapeHtml(meetingStatus.label)}</span>
-          ${meetingLink ? `<button class="link-btn ghost copy-link" type="button" data-action="copy-link" data-link="${escapeAttribute(meetingLink)}">Copy link</button>` : ""}
+          <div>
+            <h3>${escapeHtml(getClassTitle(classItem))}</h3>
+            <p class="panel-subtitle">${escapeHtml(formatDate(classItem.dateTime))}</p>
+          </div>
+          <span class="status-pill ${existingSubmission ? "" : "pending"}">${existingSubmission ? "HW done ✓" : "HW open"}</span>
         </div>
         <div class="card__meta">
-          <span><strong>Teacher:</strong> ${escapeHtml(classItem.teacherName)}</span>
-          <span><strong>For:</strong> ${escapeHtml(formatStudentNames(classItem.studentNames))}</span>
-          <span><strong>Class Type:</strong> ${escapeHtml(getMeetingProviderLabel(meetingProvider))}</span>
-          <span><strong>Homework:</strong> ${existingSubmission ? "Uploaded" : "Pending"}</span>
+          <span>Teacher: ${escapeHtml(classItem.teacherName || "Teacher")}</span>
         </div>
         <div class="class-actions">
-          ${renderExternalAction(meetingLink, "primary", getMeetingActionLabel(meetingProvider, "student"), getMeetingUnavailableLabel(meetingProvider))}
-          ${renderExternalAction(driveLink, "secondary", "Open Drive Doc", "Drive link unavailable")}
+          ${renderExternalAction(meetingLink, "primary kid-join", "Join class 🚀", getMeetingUnavailableLabel(meetingProvider))}
+          ${driveLink ? renderExternalAction(driveLink, "secondary", "Materials", "No materials") : ""}
         </div>
       </article>
     `;
@@ -632,17 +660,17 @@
     const driveLink = safeExternalUrl(classItem.driveLink);
 
     return `
-      <article class="card card--soft">
+      <article class="card card--soft kid-card">
         <div class="card__top">
           <div>
             <h3>${escapeHtml(getClassTitle(classItem))}</h3>
-            <p>${escapeHtml(formatDate(classItem.dateTime))}</p>
+            <p class="panel-subtitle">${escapeHtml(formatDate(classItem.dateTime))}</p>
           </div>
-          <span class="status-pill ${existingSubmission ? "" : "pending"}">${existingSubmission ? "Uploaded" : "Pending"}</span>
+          <span class="status-pill ${existingSubmission ? "" : "pending"}">${existingSubmission ? "Sent ✓" : "To do"}</span>
         </div>
         <div class="card__meta">
-          <span><strong>Teacher:</strong> ${escapeHtml(classItem.teacherName)}</span>
-          ${driveLink ? `<span><strong>Drive:</strong> ${escapeHtml(classItem.driveLink)}</span>` : ""}
+          <span>Teacher: ${escapeHtml(classItem.teacherName || "Teacher")}</span>
+          ${driveLink ? `<span>Materials ready</span>` : ""}
         </div>
         ${existingSubmission && existingSubmission.feedback ? `
           <div class="feedback-note">
@@ -652,10 +680,10 @@
         ` : ""}
         <form class="form-grid" data-form="upload-homework" data-class-id="${classItem.id}">
           <div class="field">
-            <label for="homework-${classItem.id}">${existingSubmission ? "Replace homework photo" : "Upload homework photo"}</label>
+            <label for="homework-${classItem.id}">${existingSubmission ? "Send a new photo" : "Pick a homework photo"}</label>
             <input id="homework-${classItem.id}" name="homework" type="file" accept="image/*" capture="environment" required>
           </div>
-          <button class="btn primary" type="submit">${existingSubmission ? "Update Homework" : "Submit Homework"}</button>
+          <button class="btn primary kid-join" type="submit">${existingSubmission ? "Update ✨" : "Send homework 📤"}</button>
         </form>
       </article>
     `;
@@ -782,10 +810,11 @@
     return `<div class="message ${state.message.type}">${escapeHtml(state.message.text)}</div>`;
   }
 
-  function renderDashboardTabs() {
+  function renderDashboardTabs(options = {}) {
+    const kid = Boolean(options.kid);
     return `
-      <div class="tab-bar" role="tablist" aria-label="Dashboard sections">
-        <button class="tab-pill ${state.dashboardTab === "meetings" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.dashboardTab === "meetings"}" data-action="set-dashboard-tab" data-tab="meetings">Classes</button>
+      <div class="tab-bar${kid ? " tab-bar--kid" : ""}" role="tablist" aria-label="Dashboard sections">
+        <button class="tab-pill ${state.dashboardTab === "meetings" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.dashboardTab === "meetings"}" data-action="set-dashboard-tab" data-tab="meetings">${kid ? "My classes" : "Classes"}</button>
         <button class="tab-pill ${state.dashboardTab === "homework" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.dashboardTab === "homework"}" data-action="set-dashboard-tab" data-tab="homework">Homework</button>
       </div>
     `;
@@ -1043,6 +1072,35 @@
       return;
     }
 
+    if (actionButton.dataset.action === "set-schedule-mode") {
+      state.scheduleMode = actionButton.dataset.mode === "series" ? "series" : "once";
+      state.selectedClassId = null;
+      state.isEditingClass = false;
+      renderApp();
+      return;
+    }
+
+    if (actionButton.dataset.action === "add-series-time") {
+      if (state.seriesTimes.length < 6) {
+        const last = state.seriesTimes[state.seriesTimes.length - 1] || "16:00";
+        const [hours, minutes] = last.split(":").map(Number);
+        const nextMinutes = ((hours * 60) + minutes + 60) % (24 * 60);
+        const next = `${String(Math.floor(nextMinutes / 60)).padStart(2, "0")}:${String(nextMinutes % 60).padStart(2, "0")}`;
+        state.seriesTimes = [...state.seriesTimes, next];
+        renderApp();
+      }
+      return;
+    }
+
+    if (actionButton.dataset.action === "remove-series-time") {
+      const index = Number(actionButton.dataset.index);
+      if (Number.isInteger(index) && state.seriesTimes.length > 1) {
+        state.seriesTimes = state.seriesTimes.filter((_time, timeIndex) => timeIndex !== index);
+        renderApp();
+      }
+      return;
+    }
+
     if (actionButton.dataset.action === "toggle-user-active") {
       void updateUserActivation(actionButton.dataset.userId, actionButton.dataset.nextActive === "true");
       return;
@@ -1083,11 +1141,25 @@
     state.calendarCursor = createDateKey(new Date());
     state.selectedClassId = null;
     state.isEditingClass = false;
+    state.scheduleMode = "once";
+    state.seriesPattern = "weekdays";
+    state.seriesTimes = ["16:00"];
   }
 
   function handleChange(event) {
     if (event.target.name === "meetingMode") {
       refreshMeetingModeFields(event.target.form);
+      return;
+    }
+
+    if (event.target.name === "seriesPattern") {
+      state.seriesPattern = ["weekdays", "alternate", "daily"].includes(event.target.value)
+        ? event.target.value
+        : "weekdays";
+      const weekdayField = event.target.form && event.target.form.querySelector("[data-weekday-field]");
+      if (weekdayField) {
+        weekdayField.hidden = state.seriesPattern !== "weekdays";
+      }
       return;
     }
 
@@ -1219,10 +1291,11 @@
     try {
       const manualMeetingLink = String(formData.get("manualMeetingLink") || "").trim();
       const { meetingProvider, meetingMode } = parseMeetingOption(formData.get("meetingMode"));
+      const scheduleMode = state.scheduleMode === "series" ? "series" : "once";
       const payload = {
+        scheduleMode,
         topic: String(formData.get("topic") || "").trim(),
         details: String(formData.get("details") || "").trim(),
-        dateTime: String(formData.get("dateTime") || "").trim(),
         durationMinutes: Number(formData.get("durationMinutes") || 45),
         driveLink: String(formData.get("driveLink") || "").trim(),
         studentIds: formData.getAll("studentIds").map((value) => String(value || "").trim()).filter(Boolean),
@@ -1232,6 +1305,18 @@
         manualMeetingLink
       };
 
+      if (scheduleMode === "series") {
+        payload.seriesStartDate = String(formData.get("seriesStartDate") || "").trim();
+        payload.seriesEndDate = String(formData.get("seriesEndDate") || "").trim();
+        payload.seriesPattern = String(formData.get("seriesPattern") || state.seriesPattern || "weekdays").trim();
+        payload.seriesWeekdays = formData.getAll("seriesWeekdays").map((value) => Number(value)).filter((day) => Number.isInteger(day));
+        payload.seriesTimes = formData.getAll("seriesTimes").map((value) => String(value || "").trim()).filter(Boolean);
+        state.seriesTimes = payload.seriesTimes.length ? payload.seriesTimes : state.seriesTimes;
+        state.seriesPattern = payload.seriesPattern;
+      } else {
+        payload.dateTime = String(formData.get("dateTime") || "").trim();
+      }
+
       const response = await api("/api/classes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1240,9 +1325,12 @@
 
       state.selectedClassId = response.classItem ? response.classItem.id : null;
       state.isEditingClass = false;
+      const successText = response.count > 1
+        ? (response.message || `Scheduled ${response.count} classes.`)
+        : buildClassSaveMessage(response.classItem, response.message || "Class scheduled successfully.");
       await refreshDashboard({
         type: "success",
-        text: buildClassSaveMessage(response.classItem, response.message || "Class scheduled successfully.")
+        text: successText
       });
     } catch (error) {
       renderApp({ type: "error", text: error.message });
@@ -1633,7 +1721,7 @@
 
   function getAuthRoleLabel() {
     if (state.authRole === "student") {
-      return "student";
+      return "kid";
     }
 
     if (state.authRole === "admin") {
@@ -1694,6 +1782,16 @@
     }
 
     return "";
+  }
+
+  function getDefaultSeriesMonthBounds() {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    return {
+      start: createDateKey(start),
+      end: createDateKey(end)
+    };
   }
 
   function buildClassSaveMessage(classItem, fallbackMessage) {
