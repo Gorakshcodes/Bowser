@@ -4,3 +4,6 @@ node_modules
 uploads/*
 !uploads/.gitkeep
 data/portal-data.json
+
+# Local Claude Code settings
+.claude/

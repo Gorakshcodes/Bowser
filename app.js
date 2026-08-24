@@ -9,15 +9,87 @@
     "image/heif"
   ]);
   const app = document.getElementById("app");
+  let welcomeParticleFrame = 0;
+  let welcomeParticleCleanup = null;
+  const KID_THEME_STORAGE_KEY = "bowser_kid_theme";
+  const KID_THEMES = {
+    game: {
+      id: "game",
+      label: "Game",
+      emoji: "⚔️",
+      hero: "🤖",
+      join: "DEPLOY",
+      empty: "🛡️",
+      free: "⚙️",
+      mission: "📡",
+      send: "📤",
+      trophy: "🏅",
+      trophyEmpty: "🔩",
+      calendar: "🗺️",
+      upcoming: "🎯",
+      classes: "⚙️",
+      stars: "⭐",
+      todo: "🔧",
+      bag: "🧰",
+      progress: "📈",
+      progressTitle: "Mission log",
+      greetings: ["PILOT ONLINE", "MECH READY", "SYSTEMS GO"],
+      tagline: "Mech Arena mode — bold, fast, mission-ready.",
+      missionTitle: "Transmission",
+      missionText: "Upload homework intel to command.",
+      calendarTitle: "Ops calendar",
+      listTitle: "Mission queue",
+      sendTitle: "Uplink",
+      trophyTitle: "Honor rack",
+      symbols: ["⚔️", "🤖", "🛡️", "⚙️", "🚀", "📡", "🔧", "💥"]
+    },
+    play: {
+      id: "play",
+      label: "Play",
+      emoji: "🎨",
+      hero: "🌟",
+      join: "Join class 🚀",
+      empty: "🎈",
+      free: "🌈",
+      mission: "📸",
+      send: "📤",
+      trophy: "🏆",
+      trophyEmpty: "✨",
+      calendar: "📅",
+      upcoming: "🗓️",
+      classes: "📚",
+      stars: "⭐",
+      todo: "✏️",
+      bag: "🎒",
+      progress: "📊",
+      progressTitle: "Class progress",
+      greetings: ["Hey superstar", "Hi friend", "Hello champ"],
+      tagline: "Bright, simple, and fun for learning.",
+      missionTitle: "Homework mission",
+      missionText: "Snap your work and send it to your teacher!",
+      calendarTitle: "My calendar",
+      listTitle: "Coming up",
+      sendTitle: "Send homework",
+      trophyTitle: "My stars",
+      symbols: ["📚", "🎨", "🚀", "⭐", "🎈", "🌈", "✏️", "💡"]
+    }
+  };
+
   const state = {
     user: null,
     classes: [],
     submissions: [],
+    assignments: [],
+    assignmentSubmissions: [],
     students: [],
     managedUsers: [],
     zoomConfigured: false,
     googleMeetConfigured: false,
     teamsSupported: true,
+    aiStatus: null,
+    aiDraft: null,
+    aiBusy: false,
+    insightStudentId: "",
     message: null,
     authMode: "login",
     authRole: "teacher",
@@ -25,6 +97,7 @@
     meetingProvider: "none",
     zoomMode: "manual",
     dashboardTab: "meetings",
+    progressPeriod: "all",
     calendarView: "week",
     calendarCursor: createDateKey(new Date()),
     selectedCalendarStudentId: "all",
@@ -33,8 +106,13 @@
     isEditingClass: false,
     scheduleMode: "once",
     seriesPattern: "weekdays",
-    seriesTimes: ["16:00"]
+    seriesTimes: ["16:00"],
+    classListFilter: "upcoming",
+    kidTheme: loadKidThemeId(),
+    pending2fa: null
   };
+
+  const discardedFormDrafts = new Set();
 
   initialize();
 
@@ -67,93 +145,481 @@
     }
 
     if (!state.user) {
+      document.body.classList.add("is-welcome");
+      document.body.classList.remove("is-kid");
+      clearKidThemeClasses();
       app.innerHTML = renderLogin();
+      startWelcomeParticles();
       return;
     }
 
+    stopWelcomeParticles();
+    document.body.classList.remove("is-welcome");
+    const isKid = state.user.role === "student";
+    document.body.classList.toggle("is-kid", isKid);
+    if (isKid) {
+      applyKidThemeClass(state.kidTheme);
+    } else {
+      clearKidThemeClasses();
+    }
+
+    // Every render rebuilds the dashboard markup, so half-typed forms have to be
+    // carried across by hand. Without this a background refresh (or adding a
+    // second class time) silently wipes what the teacher had already filled in.
+    const draft = captureFormDrafts();
     app.innerHTML = state.user.role === "admin"
       ? renderAdminDashboard()
       : state.user.role === "teacher"
         ? renderTeacherDashboard()
         : renderStudentDashboard();
+    restoreFormDrafts(draft);
+  }
+
+  function captureFormDrafts() {
+    const drafts = { forms: {}, focus: null };
+    const active = document.activeElement;
+
+    app.querySelectorAll("form[data-form]").forEach((form) => {
+      const key = getFormDraftKey(form);
+      if (!key || discardedFormDrafts.has(key)) {
+        return;
+      }
+
+      const fields = {};
+      form.querySelectorAll("input[name], select[name], textarea[name]").forEach((field) => {
+        if (field.type === "file" || field.type === "password" || field.type === "submit") {
+          return;
+        }
+
+        const bucket = fields[field.name] || (fields[field.name] = []);
+        bucket.push(field.type === "checkbox" || field.type === "radio" ? field.checked : field.value);
+      });
+
+      drafts.forms[key] = fields;
+
+      if (active && form.contains(active) && active.name) {
+        drafts.focus = {
+          formKey: key,
+          name: active.name,
+          index: [...form.querySelectorAll(`[name="${CSS.escape(active.name)}"]`)].indexOf(active),
+          selectionStart: typeof active.selectionStart === "number" ? active.selectionStart : null,
+          selectionEnd: typeof active.selectionEnd === "number" ? active.selectionEnd : null
+        };
+      }
+    });
+
+    discardedFormDrafts.clear();
+    return drafts;
+  }
+
+  function restoreFormDrafts(drafts) {
+    if (!drafts) {
+      return;
+    }
+
+    app.querySelectorAll("form[data-form]").forEach((form) => {
+      const fields = drafts.forms[getFormDraftKey(form)];
+      if (!fields) {
+        return;
+      }
+
+      Object.keys(fields).forEach((name) => {
+        const values = fields[name];
+        const controls = [...form.querySelectorAll(`[name="${CSS.escape(name)}"]`)];
+        controls.forEach((control, index) => {
+          if (index >= values.length) {
+            return;
+          }
+
+          if (control.type === "checkbox" || control.type === "radio") {
+            control.checked = Boolean(values[index]);
+            return;
+          }
+
+          if (control.tagName === "SELECT" && ![...control.options].some((option) => option.value === values[index])) {
+            return;
+          }
+
+          control.value = values[index];
+        });
+      });
+    });
+
+    const focus = drafts.focus;
+    if (!focus) {
+      return;
+    }
+
+    const form = [...app.querySelectorAll("form[data-form]")].find((entry) => getFormDraftKey(entry) === focus.formKey);
+    const control = form
+      ? [...form.querySelectorAll(`[name="${CSS.escape(focus.name)}"]`)][Math.max(focus.index, 0)]
+      : null;
+
+    if (!control) {
+      return;
+    }
+
+    control.focus();
+    if (focus.selectionStart !== null && typeof control.setSelectionRange === "function") {
+      try {
+        control.setSelectionRange(focus.selectionStart, focus.selectionEnd);
+      } catch (_error) {
+        // Inputs such as date/time reject setSelectionRange; focus alone is enough.
+      }
+    }
+  }
+
+  function getFormDraftKey(form) {
+    const type = form.dataset.form || "";
+    const scope = form.dataset.classId || form.dataset.assignmentId || form.dataset.submissionId || "";
+    return scope ? `${type}:${scope}` : type;
+  }
+
+  // Marks a form so the next render starts from the freshly rendered markup
+  // instead of a stale draft (after a successful save, or when switching a
+  // form between "create" and "edit" duties).
+  function discardFormDraft(key) {
+    discardedFormDrafts.add(key);
+  }
+
+  // Series times live in state so the row count survives a render, but the
+  // teacher edits the inputs directly — read them back before changing the list.
+  function syncSeriesTimesFromDom() {
+    const inputs = [...app.querySelectorAll('form[data-form="schedule-class"] input[name="seriesTimes"]')];
+    if (!inputs.length) {
+      return;
+    }
+
+    state.seriesTimes = inputs.map((input, index) => input.value || state.seriesTimes[index] || "16:00");
+  }
+
+  function renderWelcomeStickers() {
+    const stickers = [
+      { emoji: "📚", label: "Books", tone: "sun" },
+      { emoji: "🎒", label: "School bag", tone: "pink" },
+      { emoji: "🚲", label: "Cycle", tone: "mint" },
+      { emoji: "💻", label: "Computer", tone: "sky" },
+      { emoji: "🎮", label: "Game console", tone: "grape" },
+      { emoji: "✈️", label: "Aeroplane", tone: "sky" },
+      { emoji: "💡", label: "Bulb", tone: "sun" },
+      { emoji: "🎨", label: "Art", tone: "pink" },
+      { emoji: "🚀", label: "Rocket", tone: "grape" },
+      { emoji: "🌈", label: "Rainbow", tone: "mint" },
+      { emoji: "✏️", label: "Pencil", tone: "sun" },
+      { emoji: "🧩", label: "Puzzle", tone: "pink" },
+      { emoji: "🔬", label: "Science", tone: "sky" },
+      { emoji: "🎵", label: "Music", tone: "grape" }
+    ];
+
+    return `
+      <div class="welcome-stickers" aria-hidden="true">
+        ${stickers.map((item, index) => `
+          <span class="welcome-sticker welcome-sticker--${item.tone} welcome-sticker--${index + 1}" title="${escapeAttribute(item.label)}">${item.emoji}</span>
+        `).join("")}
+      </div>
+    `;
   }
 
   function renderLogin() {
+    const is2fa = state.authMode === "2fa";
     return `
-      <section class="welcome-shell">
-        <div class="welcome-copy">
-          <div class="brand-mark" aria-hidden="true">B</div>
-          <span class="eyebrow">Bowser</span>
-          <h1>Learning Portal</h1>
-          <p class="panel-subtitle">Classes, schedules, and homework in one calm place.</p>
-          <div class="role-switch" aria-label="Choose account type">
-            <button class="role-card ${state.authRole === "teacher" ? "is-active" : ""}" type="button" data-action="set-auth-role" data-role="teacher">
-              <strong>Teacher</strong>
-              <span>Schedule & review</span>
-            </button>
-            <button class="role-card ${state.authRole === "student" ? "is-active" : ""}" type="button" data-action="set-auth-role" data-role="student">
-              <strong>Kid</strong>
-              <span>Join & homework</span>
-            </button>
-            <button class="role-card ${state.authRole === "admin" ? "is-active" : ""}" type="button" data-action="set-auth-role" data-role="admin">
-              <strong>Admin</strong>
-              <span>Accounts</span>
-            </button>
-          </div>
-        </div>
+      <section class="welcome-stage" aria-label="Welcome">
+        <canvas class="welcome-particles" id="welcome-particles" aria-hidden="true"></canvas>
+        <div class="welcome-nebula" aria-hidden="true"></div>
+        <div class="welcome-grid" aria-hidden="true"></div>
+        <div class="welcome-horizon" aria-hidden="true"></div>
+        <div class="welcome-scanlines" aria-hidden="true"></div>
+        ${renderWelcomeStickers()}
 
-        <div class="surface auth-panel">
-          <div class="auth-switch">
-            <button class="btn ${state.authMode === "login" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="login">Login</button>
-            ${state.authRole === "admin"
-              ? ""
-              : `<button class="btn ${state.authMode === "register" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="register">Sign up</button>`}
+        <div class="welcome-card welcome-card--v2">
+          <div class="welcome-card__glow" aria-hidden="true"></div>
+          <div class="welcome-card__orbit" aria-hidden="true"></div>
+          <div class="welcome-card__ring" aria-hidden="true"></div>
+
+          <header class="welcome-card__hero">
+            <div class="brand-mark" aria-hidden="true">B</div>
+            <div class="welcome-card__titles">
+              <span class="eyebrow welcome-eyebrow">Bowser · Secure portal</span>
+              <h1>Learn. Launch. Level up.</h1>
+              <p class="welcome-lede">A bright home for classes, schedules, and homework — protected with 2-step sign-in.</p>
+            </div>
+          </header>
+
+          <ul class="welcome-features" aria-hidden="true">
+            <li><span>📅</span> Schedules</li>
+            <li><span>🚀</span> Join class</li>
+            <li><span>📸</span> Homework</li>
+            <li><span>🔒</span> 2FA login</li>
+          </ul>
+
+          <div class="welcome-card__divider" aria-hidden="true">
+            <span></span>
           </div>
-          <h2 class="panel-title">${state.authMode === "register" ? `Create ${getAuthRoleLabel()} account` : `${getAuthRoleLabel()} login`}</h2>
-          <p class="panel-subtitle">
-            ${state.authMode === "register"
-              ? "New accounts need admin approval before login."
-              : "Use your email and password to continue."}
-          </p>
-          ${state.authMode === "register" && state.authRole !== "admin" ? renderRegisterForm() : renderLoginForm()}
-          ${renderMessage()}
+
+          <div class="welcome-card__auth">
+            ${is2fa ? "" : `
+              <div class="auth-switch">
+                <button class="btn ${state.authMode === "login" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="login">Login</button>
+                <button class="btn ${state.authMode === "register" ? "primary" : "secondary"}" type="button" data-action="set-auth-mode" data-mode="register">Sign up</button>
+              </div>
+            `}
+            <h2 class="panel-title">
+              ${is2fa
+                ? "Verify it’s you"
+                : state.authMode === "register"
+                  ? "Create account"
+                  : "Welcome back"}
+            </h2>
+            <p class="panel-subtitle">
+              ${is2fa
+                ? "Enter the 6-digit code to finish signing in."
+                : state.authMode === "register"
+                  ? "New accounts need admin approval before login."
+                  : "Email + password, then a one-time code."}
+            </p>
+            ${is2fa
+              ? renderTwoFactorForm()
+              : state.authMode === "register"
+                ? renderRegisterForm()
+                : renderLoginForm()}
+            ${renderMessage()}
+          </div>
         </div>
       </section>
     `;
   }
 
+  function stopWelcomeParticles() {
+    if (welcomeParticleFrame) {
+      window.cancelAnimationFrame(welcomeParticleFrame);
+      welcomeParticleFrame = 0;
+    }
+    if (typeof welcomeParticleCleanup === "function") {
+      welcomeParticleCleanup();
+      welcomeParticleCleanup = null;
+    }
+  }
+
+  function startWelcomeParticles() {
+    stopWelcomeParticles();
+
+    const canvas = document.getElementById("welcome-particles");
+    if (!canvas || !canvas.getContext) {
+      return;
+    }
+
+    const ctx = canvas.getContext("2d");
+    const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let width = 0;
+    let height = 0;
+    let dpr = 1;
+    let particles = [];
+    let running = true;
+
+    function particleCount() {
+      const area = width * height;
+      return Math.max(48, Math.min(140, Math.floor(area / 14000)));
+    }
+
+    function createParticle() {
+      return {
+        x: Math.random() * width,
+        y: Math.random() * height,
+        vx: (Math.random() - 0.5) * 0.35,
+        vy: (Math.random() - 0.5) * 0.35,
+        r: 0.6 + Math.random() * 1.8,
+        a: 0.25 + Math.random() * 0.55,
+        hue: Math.random() < 0.55 ? 210 + Math.random() * 40 : 270 + Math.random() * 35
+      };
+    }
+
+    function resize() {
+      const stage = canvas.parentElement;
+      const bounds = stage ? stage.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      width = Math.max(1, Math.floor(bounds.width));
+      height = Math.max(1, Math.floor(bounds.height));
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      const target = reduceMotion ? Math.min(36, particleCount()) : particleCount();
+      particles = Array.from({ length: target }, createParticle);
+    }
+
+    function step() {
+      if (!running) {
+        return;
+      }
+
+      ctx.clearRect(0, 0, width, height);
+
+      // Soft space dust veil
+      ctx.fillStyle = "rgba(120, 160, 255, 0.015)";
+      ctx.fillRect(0, 0, width, height);
+
+      for (let i = 0; i < particles.length; i += 1) {
+        const p = particles[i];
+
+        // Brownian kick: random force each frame, damped velocity
+        if (!reduceMotion) {
+          p.vx += (Math.random() - 0.5) * 0.12;
+          p.vy += (Math.random() - 0.5) * 0.12;
+          p.vx *= 0.96;
+          p.vy *= 0.96;
+          // Soft speed cap
+          const speed = Math.hypot(p.vx, p.vy);
+          if (speed > 1.4) {
+            p.vx = (p.vx / speed) * 1.4;
+            p.vy = (p.vy / speed) * 1.4;
+          }
+          p.x += p.vx;
+          p.y += p.vy;
+        }
+
+        // Wrap edges for continuous field
+        if (p.x < -4) p.x = width + 4;
+        if (p.x > width + 4) p.x = -4;
+        if (p.y < -4) p.y = height + 4;
+        if (p.y > height + 4) p.y = -4;
+
+        // Faint links between nearby particles
+        for (let j = i + 1; j < particles.length; j += 1) {
+          const q = particles[j];
+          const dx = p.x - q.x;
+          const dy = p.y - q.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < 88) {
+            const alpha = (1 - dist / 88) * 0.12;
+            ctx.strokeStyle = `rgba(160, 190, 255, ${alpha})`;
+            ctx.lineWidth = 0.6;
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+            ctx.lineTo(q.x, q.y);
+            ctx.stroke();
+          }
+        }
+
+        const gradient = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 3.2);
+        gradient.addColorStop(0, `hsla(${p.hue}, 90%, 78%, ${p.a})`);
+        gradient.addColorStop(1, `hsla(${p.hue}, 90%, 70%, 0)`);
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * 3.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = `hsla(${p.hue}, 95%, 88%, ${Math.min(1, p.a + 0.2)})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      welcomeParticleFrame = window.requestAnimationFrame(step);
+    }
+
+    resize();
+    if (reduceMotion) {
+      // One static frame for reduced-motion users
+      step();
+      window.cancelAnimationFrame(welcomeParticleFrame);
+      welcomeParticleFrame = 0;
+    } else {
+      welcomeParticleFrame = window.requestAnimationFrame(step);
+    }
+
+    const onResize = () => resize();
+    window.addEventListener("resize", onResize);
+
+    welcomeParticleCleanup = () => {
+      running = false;
+      window.removeEventListener("resize", onResize);
+    };
+  }
+
   function renderLoginForm() {
     return `
       <form class="form-grid" data-form="login" autocomplete="on">
-        <input name="role" type="hidden" value="${escapeAttribute(state.authRole)}">
         <div class="field">
           <label for="login-email">Email</label>
-          <input id="login-email" name="email" type="email" placeholder="${getAuthEmailPlaceholder()}" required autocomplete="username">
+          <input id="login-email" name="email" type="email" placeholder="you@example.com" required autocomplete="username">
         </div>
         <div class="field">
           <label for="login-password">Password</label>
           <input id="login-password" name="password" type="password" placeholder="Your password" required autocomplete="current-password">
         </div>
-        <button class="btn primary" type="submit">Sign in</button>
+        <button class="btn primary" type="submit">Continue</button>
+        <p class="field-hint">Next step: 6-digit verification code (2FA).</p>
+      </form>
+    `;
+  }
+
+  function renderTwoFactorForm() {
+    const pending = state.pending2fa || {};
+    const hasCode = Boolean(pending.devCode);
+    const viaSms = pending.delivery === "sms";
+    const phoneHint = pending.maskedPhone
+      ? `We texted a code to <strong>${escapeHtml(pending.maskedPhone)}</strong>.`
+      : "We texted a code to your mobile number.";
+    const codeBox = hasCode
+      ? `
+        <div class="welcome-otp-panel" role="status">
+          <span class="welcome-otp-panel__label">Your login code</span>
+          <strong class="welcome-otp-panel__code">${escapeHtml(pending.devCode)}</strong>
+          <span class="welcome-otp-panel__hint">SMS is not configured yet — use this on-screen code (also in the server terminal).</span>
+          <button class="btn secondary" type="button" data-action="copy-otp" data-code="${escapeAttribute(pending.devCode)}">Copy code</button>
+        </div>
+      `
+      : `
+        <div class="field-hint welcome-otp-hint">
+          ${viaSms ? phoneHint : "Check your phone for a 6-digit SMS code."}
+          If it does not arrive, click Resend.
+        </div>
+      `;
+    return `
+      <form class="form-grid" data-form="verify-2fa" autocomplete="one-time-code">
+        ${codeBox}
+        <div class="field">
+          <label for="otp-code">Enter 6-digit code</label>
+          <input id="otp-code" name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" minlength="6" placeholder="123456" required autocomplete="one-time-code" value="${escapeAttribute(hasCode ? pending.devCode : "")}">
+        </div>
+        <div class="form-actions">
+          <button class="btn primary" type="submit">Verify & enter</button>
+          <button class="btn secondary" type="button" data-action="resend-2fa">Resend SMS</button>
+          <button class="btn ghost" type="button" data-action="cancel-2fa">Back</button>
+        </div>
       </form>
     `;
   }
 
   function renderRegisterForm() {
+    const isTeacher = state.registerRole === "teacher";
     return `
       <form class="form-grid" data-form="register" autocomplete="on">
-        <input name="role" type="hidden" value="${escapeAttribute(state.authRole)}">
         <div class="field">
-          <label for="register-name">${state.authRole === "student" ? "Kid's name" : "Teacher name"}</label>
-          <input id="register-name" name="name" type="text" maxlength="80" placeholder="${state.authRole === "student" ? "e.g. Diya" : "Your name"}" required>
+          <label for="register-role">I am a</label>
+          <select id="register-role" name="role" data-register-role>
+            <option value="teacher"${isTeacher ? " selected" : ""}>Teacher</option>
+            <option value="student"${!isTeacher ? " selected" : ""}>Kid / Student</option>
+          </select>
         </div>
-        <div class="field" ${state.authRole === "teacher" ? "" : "hidden"}>
+        <div class="field">
+          <label for="register-name">${isTeacher ? "Name" : "Kid's name"}</label>
+          <input id="register-name" name="name" type="text" maxlength="80" placeholder="${isTeacher ? "Your name" : "Student name"}" required>
+        </div>
+        <div class="field" data-register-subject-field ${isTeacher ? "" : "hidden"}>
           <label for="register-subject">Subject</label>
           <input id="register-subject" name="subject" type="text" maxlength="80" placeholder="e.g. Maths">
         </div>
         <div class="field">
           <label for="register-email">Email</label>
           <input id="register-email" name="email" type="email" maxlength="254" placeholder="email@example.com" required autocomplete="email">
+        </div>
+        <div class="field">
+          <label for="register-phone">Mobile number (SMS codes)</label>
+          <input id="register-phone" name="phone" type="tel" maxlength="20" placeholder="e.g. +919876543210" required autocomplete="tel">
+          <div class="field-hint">Used to text your 6-digit login code. Include country code.</div>
         </div>
         <div class="field">
           <label for="register-password">Password</label>
@@ -168,6 +634,12 @@
   function renderTeacherDashboard() {
     const teacherClasses = [...state.classes].sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
     const upcomingTeacherClasses = teacherClasses.filter(isCurrentOrUpcomingClass);
+    // Newest first when looking backwards — the last class taught is the one a
+    // teacher usually wants.
+    const pastTeacherClasses = teacherClasses
+      .filter((classItem) => !isCurrentOrUpcomingClass(classItem))
+      .reverse();
+    const listedClasses = getListedTeacherClasses(teacherClasses, upcomingTeacherClasses, pastTeacherClasses);
     const teacherSubmissions = [...state.submissions].sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
     const reviewedCount = teacherSubmissions.filter((submission) => submission.score).length;
     const calendarClasses = getFilteredCalendarClasses(teacherClasses);
@@ -198,7 +670,7 @@
           <div>
             <span class="eyebrow">${escapeHtml(state.user.subject || "Teacher")}</span>
             <h2 class="panel-title">Hi, ${escapeHtml(state.user.name)}</h2>
-            <p class="panel-subtitle">${teacherClasses.length} classes · ${state.students.length} kids · ${reviewedCount} homework reviewed</p>
+            <p class="panel-subtitle">${getClassProgress(teacherClasses).conducted.length}/${teacherClasses.length} classes done · ${state.students.length} kids · ${reviewedCount} homework reviewed</p>
           </div>
           <div class="dashboard-actions">
             <button class="btn ghost" type="button" data-action="logout">Logout</button>
@@ -236,82 +708,361 @@
             <section class="card">
               <div class="section-heading">
                 <div>
-                  <h3>Upcoming</h3>
-                  <p class="panel-subtitle">Next classes at a glance</p>
+                  <h3>Classes</h3>
+                  <p class="panel-subtitle">${escapeHtml(listedClasses.subtitle)}</p>
                 </div>
               </div>
-              <div class="section-stack">
-                ${upcomingTeacherClasses.length ? upcomingTeacherClasses.slice(0, 8).map(renderTeacherClassCard).join("") : renderEmptyState("No upcoming classes", "Schedule a class or a monthly series to fill this list.")}
+              <div class="segmented" role="group" aria-label="Which classes to show">
+                <button class="segmented__btn ${state.classListFilter === "upcoming" ? "is-active" : ""}" type="button" data-action="set-class-filter" data-filter="upcoming">Upcoming (${upcomingTeacherClasses.length})</button>
+                <button class="segmented__btn ${state.classListFilter === "past" ? "is-active" : ""}" type="button" data-action="set-class-filter" data-filter="past">Past (${pastTeacherClasses.length})</button>
+                <button class="segmented__btn ${state.classListFilter === "all" ? "is-active" : ""}" type="button" data-action="set-class-filter" data-filter="all">All (${teacherClasses.length})</button>
               </div>
+              <div class="section-stack">
+                ${listedClasses.items.length
+                  ? listedClasses.items.slice(0, 20).map(renderTeacherClassCard).join("")
+                  : renderEmptyState(listedClasses.emptyTitle, listedClasses.emptyHint)}
+              </div>
+              ${listedClasses.items.length > 20 ? `<p class="field-hint">Showing the first 20 of ${listedClasses.items.length}. Use the calendar to reach the rest.</p>` : ""}
             </section>
           </div>
+        ` : state.dashboardTab === "coach" ? `
+          ${renderTeacherCoachPanel()}
+        ` : state.dashboardTab === "progress" ? `
+          ${renderClassProgressPanel()}
         ` : `
-          <section class="card">
-            <div class="section-heading">
-              <div>
-                <h3>Homework</h3>
-                <p class="panel-subtitle">${teacherSubmissions.length - reviewedCount} waiting · ${reviewedCount} reviewed</p>
-              </div>
-            </div>
-            <div class="section-stack">
-              ${teacherSubmissions.length ? teacherSubmissions.map(renderTeacherSubmissionCard).join("") : renderEmptyState("No homework yet", "Student uploads will show up here.")}
-            </div>
-          </section>
+          ${renderTeacherHomeworkWorkspace(teacherSubmissions, reviewedCount)}
         `}
         ${renderMessage()}
       </section>
     `;
   }
 
+  function renderTeacherHomeworkWorkspace(teacherSubmissions, reviewedCount) {
+    const assignments = state.assignments || [];
+    const assignmentSubs = state.assignmentSubmissions || [];
+    const openAssign = assignments.length;
+    const waitingAssign = assignmentSubs.filter((entry) => !entry.score).length;
+    return `
+      <div class="dashboard-columns" style="grid-template-columns: 1fr 1fr;">
+        <section class="card">
+          <div class="section-heading">
+            <div>
+              <h3>Assign activity</h3>
+              <p class="panel-subtitle">Write a homework note/activity for one or more kids</p>
+            </div>
+          </div>
+          <form class="form-grid" data-form="create-assignment">
+            <div class="field">
+              <label for="assign-student">Kid</label>
+              <select id="assign-student" name="studentIds" ${getSchedulableStudents().length ? "required" : "disabled"}>
+                <option value="">${getSchedulableStudents().length ? "Select kid" : "No active kids yet"}</option>
+                ${getSchedulableStudents().map((student) => `<option value="${escapeAttribute(student.id)}">${escapeHtml(student.name)}</option>`).join("")}
+              </select>
+              ${renderPendingKidsHint()}
+            </div>
+            <div class="field">
+              <label for="assign-title">Title</label>
+              <input id="assign-title" name="title" type="text" maxlength="160" placeholder="e.g. Fractions practice" required value="${escapeAttribute(state.aiDraft && state.aiDraft.title || "")}">
+            </div>
+            <div class="form-grid two">
+              <div class="field">
+                <label for="assign-type">Type</label>
+                <select id="assign-type" name="activityType">
+                  <option value="practice">Practice</option>
+                  <option value="quiz">Quiz / questions</option>
+                  <option value="project">Project / activity</option>
+                  <option value="revision">Revision notes</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="assign-due">Due (optional)</label>
+                <input id="assign-due" name="dueAt" type="datetime-local">
+              </div>
+            </div>
+            <div class="field">
+              <label for="assign-instructions">Instructions / activity note</label>
+              <textarea id="assign-instructions" name="instructions" maxlength="2000" placeholder="What should the student do?" required>${escapeHtml(state.aiDraft && (state.aiDraft.instructions || state.aiDraft.kidFriendlyPrompt || "") || "")}</textarea>
+            </div>
+            <div class="field">
+              <label for="assign-questions">Questions (one per line, optional)</label>
+              <textarea id="assign-questions" name="questionsText" maxlength="4000" placeholder="1. ...\n2. ...">${escapeHtml(formatAiQuestionsText(state.aiDraft))}</textarea>
+            </div>
+            <div class="field">
+              <label for="assign-revision">Revision notes for kid (optional)</label>
+              <textarea id="assign-revision" name="revisionNotes" maxlength="2000" placeholder="Key points to remember...">${escapeHtml(formatAiRevisionText(state.aiDraft))}</textarea>
+            </div>
+            <div class="form-actions">
+              <button class="btn primary" type="submit">Send to student</button>
+              <button class="btn secondary" type="button" data-action="ai-fill-homework">AI: draft homework</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <div>
+              <h3>Assigned (${openAssign})</h3>
+              <p class="panel-subtitle">${waitingAssign} activity answers waiting for review</p>
+            </div>
+          </div>
+          <div class="section-stack">
+            ${assignments.length
+              ? assignments.map(renderTeacherAssignmentCard).join("")
+              : renderEmptyState("No activities yet", "Create a homework note or generate one with AI.")}
+          </div>
+        </section>
+      </div>
+
+      <section class="card" style="margin-top:16px;">
+        <div class="section-heading">
+          <div>
+            <h3>Activity answers</h3>
+            <p class="panel-subtitle">Text solutions under each homework activity</p>
+          </div>
+        </div>
+        <div class="section-stack">
+          ${assignmentSubs.length
+            ? assignmentSubs.map(renderTeacherAssignmentSubmissionCard).join("")
+            : renderEmptyState("No activity answers yet", "When students solve homework, they appear here.")}
+        </div>
+      </section>
+
+      <section class="card" style="margin-top:16px;">
+        <div class="section-heading">
+          <div>
+            <h3>Photo homework</h3>
+            <p class="panel-subtitle">${teacherSubmissions.length - reviewedCount} waiting · ${reviewedCount} reviewed</p>
+          </div>
+        </div>
+        <div class="section-stack">
+          ${teacherSubmissions.length ? teacherSubmissions.map(renderTeacherSubmissionCard).join("") : renderEmptyState("No photo uploads yet", "Class photo homework still works as before.")}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderTeacherCoachPanel() {
+    const insightStudentId = state.insightStudentId || (state.students[0] && state.students[0].id) || "";
+    const draft = state.aiDraft || null;
+    return `
+      <div class="dashboard-columns" style="grid-template-columns: 1fr 1fr;">
+        <section class="card">
+          <div class="section-heading">
+            <div>
+              <h3>AI teaching coach</h3>
+              <p class="panel-subtitle">Lesson plans, revision notes, activities, and kid insights. Works offline with templates; add AI_API_KEY for live models.</p>
+            </div>
+          </div>
+          <form class="form-grid" data-form="ai-coach">
+            <div class="field">
+              <label for="ai-task">What do you need?</label>
+              <select id="ai-task" name="task">
+                <option value="lesson-plan">Lesson plan</option>
+                <option value="homework">Homework questions</option>
+                <option value="activity">Hands-on activity</option>
+                <option value="revision-notes">Revision notes for kids</option>
+                <option value="student-insight">Gauge kid learning + suggestions</option>
+              </select>
+            </div>
+            <div class="form-grid two">
+              <div class="field">
+                <label for="ai-topic">Topic</label>
+                <input id="ai-topic" name="topic" type="text" placeholder="e.g. Fractions" required>
+              </div>
+              <div class="field">
+                <label for="ai-subject">Subject</label>
+                <input id="ai-subject" name="subject" type="text" value="${escapeAttribute(state.user.subject || "")}" placeholder="Maths">
+              </div>
+            </div>
+            <div class="field">
+              <label for="ai-notes">What was taught / class notes</label>
+              <textarea id="ai-notes" name="notes" placeholder="Bullet what you covered today..."></textarea>
+            </div>
+            <div class="field">
+              <label for="ai-student">Student (for insight only)</label>
+              <select id="ai-student" name="studentId">
+                <option value="">Select student</option>
+                ${state.students.map((student) => `
+                  <option value="${escapeAttribute(student.id)}"${insightStudentId === student.id ? " selected" : ""}>${escapeHtml(student.name)}</option>
+                `).join("")}
+              </select>
+            </div>
+            <div class="form-actions">
+              <button class="btn primary" type="submit" ${state.aiBusy ? "disabled" : ""}>${state.aiBusy ? "Thinking..." : "Generate with AI"}</button>
+            </div>
+            <p class="field-hint">Provider: ${escapeHtml(state.aiStatus && state.aiStatus.apiConfigured ? "API key ready" : "offline templates (or local Ollama if running)")}</p>
+          </form>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <div>
+              <h3>Coach output</h3>
+              <p class="panel-subtitle">Copy into an assignment or use as planning notes</p>
+            </div>
+          </div>
+          ${draft ? renderAiDraftCard(draft) : renderEmptyState("No AI output yet", "Generate a lesson plan, homework set, activity, or student insight.")}
+        </section>
+      </div>
+    `;
+  }
+
+  function renderAiDraftCard(draft) {
+    const pretty = escapeHtml(JSON.stringify(draft, null, 2));
+    return `
+      <article class="card card--soft">
+        <pre class="ai-draft-pre">${pretty}</pre>
+        <div class="form-actions">
+          <button class="btn secondary" type="button" data-action="ai-use-as-homework">Use as homework draft</button>
+          <button class="btn ghost" type="button" data-action="ai-clear-draft">Clear</button>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderTeacherAssignmentCard(assignment) {
+    const subs = (state.assignmentSubmissions || []).filter((entry) => entry.assignmentId === assignment.id);
+    return `
+      <article class="card card--soft">
+        <div class="card__top">
+          <div>
+            <h3>${escapeHtml(assignment.title)}</h3>
+            <p class="panel-subtitle">${escapeHtml(assignment.activityType || "practice")} · ${escapeHtml(formatStudentNames(assignment.studentNames))}</p>
+          </div>
+          <span class="status-pill">${subs.length} answer${subs.length === 1 ? "" : "s"}</span>
+        </div>
+        <p class="class-details">${escapeHtml(assignment.instructions || "")}</p>
+        ${Array.isArray(assignment.questions) && assignment.questions.length ? `
+          <ol class="assign-q-list">
+            ${assignment.questions.map((question) => `<li>${escapeHtml(question.prompt)}</li>`).join("")}
+          </ol>
+        ` : ""}
+        ${assignment.dueAt ? `<p class="panel-subtitle">Due ${escapeHtml(formatDate(assignment.dueAt))}</p>` : ""}
+      </article>
+    `;
+  }
+
+  function renderTeacherAssignmentSubmissionCard(submission) {
+    const assignment = (state.assignments || []).find((entry) => entry.id === submission.assignmentId);
+    return `
+      <article class="submission-card">
+        <div class="submission-top">
+          <div>
+            <h3>${escapeHtml(submission.studentName)}</h3>
+            <p>${assignment ? escapeHtml(assignment.title) : "Activity"}</p>
+          </div>
+          <span class="status-pill ${submission.score ? "" : "pending"}">${submission.score ? escapeHtml(submission.score) : "Needs review"}</span>
+        </div>
+        ${submission.textResponse ? `<p class="class-details">${escapeHtml(submission.textResponse)}</p>` : ""}
+        ${Array.isArray(submission.answers) && submission.answers.length ? `
+          <div class="section-stack">
+            ${submission.answers.map((answer, index) => `
+              <div class="card card--soft">
+                <strong>Q${index + 1}</strong>
+                <p>${escapeHtml(answer.text || "")}</p>
+              </div>
+            `).join("")}
+          </div>
+        ` : ""}
+        ${submission.imageUrl ? `<img class="homework-preview" src="${escapeAttribute(submission.imageUrl)}" alt="Homework image">` : ""}
+        <form class="form-grid" data-form="grade-assignment" data-submission-id="${escapeAttribute(submission.id)}">
+          <div class="form-grid two">
+            <div class="field">
+              <label>Score</label>
+              <input name="score" type="text" value="${escapeAttribute(submission.score || "")}" placeholder="e.g. 8/10">
+            </div>
+            <div class="field">
+              <label>Feedback</label>
+              <input name="feedback" type="text" value="${escapeAttribute(submission.feedback || "")}" placeholder="Encouraging note">
+            </div>
+          </div>
+          <button class="btn primary" type="submit">Save feedback</button>
+        </form>
+      </article>
+    `;
+  }
+
   function renderStudentDashboard() {
+    const theme = getKidTheme();
     const classes = [...state.classes].sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
     const upcomingClasses = classes.filter(isCurrentOrUpcomingClass);
+    const pastClasses = classes.filter((classItem) => !isCurrentOrUpcomingClass(classItem)).reverse();
     const submissions = [...state.submissions].sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
     const calendarClasses = getFilteredCalendarClasses(classes);
     const nextClass = upcomingClasses[0] || null;
-    const stars = submissions.filter((submission) => submission.score).length;
+    const assignmentSubs = state.assignmentSubmissions || [];
+    const assignments = state.assignments || [];
+    const stars = submissions.filter((submission) => submission.score).length
+      + assignmentSubs.filter((submission) => submission.score).length;
+    const todoHomework = assignments.filter((assignment) =>
+      !assignmentSubs.some((submission) => submission.assignmentId === assignment.id)
+    ).length
+      + classes.filter((classItem) => !submissions.some((s) => s.classId === classItem.id)).length;
+    const greeting = theme.greetings[Math.abs(String(state.user.name || "a").charCodeAt(0)) % theme.greetings.length];
 
     return `
-      <section class="surface kid-shell">
+      <section class="surface kid-shell kid-shell--${escapeAttribute(theme.id)}">
+        <div class="kid-shell__glow" aria-hidden="true"></div>
+        <div class="kid-shell__pattern" aria-hidden="true"></div>
+        <div class="kid-theme-symbols" aria-hidden="true">
+          ${theme.symbols.map((symbol, index) => `
+            <span class="kid-theme-symbol kid-theme-symbol--${index + 1}">${symbol}</span>
+          `).join("")}
+        </div>
+
         <div class="dashboard-header kid-header">
           <div>
-            <span class="eyebrow kid-eyebrow">Hi there 👋</span>
-            <h2 class="panel-title">${escapeHtml(state.user.name)}</h2>
-            <p class="panel-subtitle">Your classes and homework live here.</p>
+            <span class="eyebrow kid-eyebrow">${escapeHtml(greeting)} ${theme.emoji}</span>
+            <h2 class="panel-title kid-title">${escapeHtml(state.user.name)}</h2>
+            <p class="panel-subtitle kid-sub">${escapeHtml(theme.tagline)}</p>
           </div>
-          <div class="dashboard-actions">
-            <span class="kid-chip">📚 ${classes.length} classes</span>
-            <span class="kid-chip">⭐ ${stars} stars</span>
-            <button class="btn ghost" type="button" data-action="logout">Logout</button>
+          <div class="dashboard-actions kid-badges">
+            <span class="kid-badge-stat kid-badge-stat--blue"><span>${theme.classes}</span><strong>${getClassProgress(classes).conducted.length}/${classes.length}</strong><em>done</em></span>
+            <span class="kid-badge-stat kid-badge-stat--gold"><span>${theme.stars}</span><strong>${stars}</strong><em>stars</em></span>
+            <span class="kid-badge-stat kid-badge-stat--pink"><span>${theme.todo}</span><strong>${todoHomework}</strong><em>to-do</em></span>
+            <button class="btn ghost kid-logout" type="button" data-action="logout">Bye 👋</button>
           </div>
         </div>
-        ${renderDashboardTabs({ kid: true })}
+
+        ${renderKidThemePicker(theme)}
+        ${renderDashboardTabs({ kid: true, theme })}
+
         ${state.dashboardTab === "meetings" ? `
           ${nextClass ? `
             <section class="card kid-hero-card">
               <div class="kid-hero">
-                <div>
-                  <span class="kid-label">Next class</span>
+                <div class="kid-hero__icon" aria-hidden="true">${theme.hero}</div>
+                <div class="kid-hero__copy">
+                  <span class="kid-label">Up next — let’s go!</span>
                   <h3>${escapeHtml(getClassTitle(nextClass))}</h3>
-                  <p>${escapeHtml(formatDate(nextClass.dateTime))} · with ${escapeHtml(nextClass.teacherName || "your teacher")}</p>
+                  <p>🗓️ ${escapeHtml(formatDate(nextClass.dateTime))}</p>
+                  <p class="kid-meta">👩‍🏫 ${escapeHtml(nextClass.teacherName || "Your teacher")}</p>
                 </div>
                 <div class="kid-hero-actions">
                   ${renderExternalAction(
                     getClassMeetingLink(nextClass),
                     "primary kid-join",
-                    "Join class 🚀",
-                    "Link coming soon"
+                    theme.join,
+                    "Link soon ⏳"
                   )}
                 </div>
               </div>
             </section>
-          ` : renderEmptyState("No classes yet", "When your teacher schedules a class, it will show up here.")}
+          ` : `
+            <section class="card kid-empty-card">
+              <div class="kid-empty">
+                <span class="kid-empty__emoji" aria-hidden="true">${theme.empty}</span>
+                <h3>No class on the map yet</h3>
+                <p>When your teacher adds one, it pops up here with a big Join button!</p>
+              </div>
+            </section>
+          `}
 
           <section class="card calendar-card kid-calendar">
             <div class="calendar-header">
               <div>
-                <h3>My calendar</h3>
-                <p class="panel-subtitle">See what’s coming this week or month</p>
+                <h3 class="kid-section-title">${theme.calendar} ${escapeHtml(theme.calendarTitle)}</h3>
+                <p class="panel-subtitle kid-sub">Find class days at a glance</p>
               </div>
             </div>
             ${renderCalendarControls({
@@ -321,33 +1072,180 @@
             ${renderCalendarGrid(calendarClasses)}
           </section>
 
-          <section class="card">
-            <h3>Coming up</h3>
+          <section class="card kid-card kid-card--list">
+            <h3 class="kid-section-title">${theme.upcoming} ${escapeHtml(theme.listTitle)}</h3>
             <div class="section-stack kid-class-list">
-              ${upcomingClasses.length ? upcomingClasses.map(renderStudentClassCard).join("") : renderEmptyState("Nothing scheduled", "Enjoy the free time — or check back soon!")}
+              ${upcomingClasses.length
+                ? upcomingClasses.map(renderStudentClassCard).join("")
+                : `
+                  <div class="kid-empty kid-empty--soft">
+                    <span class="kid-empty__emoji" aria-hidden="true">${theme.free}</span>
+                    <h3>Free play time!</h3>
+                    <p>Nothing scheduled — read, draw, or rest.</p>
+                  </div>
+                `}
             </div>
           </section>
+
+          ${pastClasses.length ? `
+            <section class="card kid-card kid-card--list">
+              <h3 class="kid-section-title">✅ Classes you finished</h3>
+              <p class="panel-subtitle kid-sub">Your last ${pastClasses.length === 1 ? "class" : `${Math.min(pastClasses.length, 6)} classes`}</p>
+              <div class="section-stack kid-class-list">
+                ${pastClasses.slice(0, 6).map(renderStudentPastClassCard).join("")}
+              </div>
+            </section>
+          ` : ""}
+        ` : state.dashboardTab === "progress" ? `
+          ${renderClassProgressPanel({ kid: true, theme })}
         ` : `
-          <div class="dashboard-columns">
-            <section class="card kid-card">
-              <h3>Send homework 📸</h3>
-              <p class="panel-subtitle">Snap a photo or pick one from your gallery.</p>
+          <div class="kid-mission">
+            <div class="kid-mission__icon" aria-hidden="true">${theme.mission}</div>
+            <div>
+              <strong>${escapeHtml(theme.missionTitle)}</strong>
+              <p>Do teacher activities with writing, solving, or a photo.</p>
+            </div>
+          </div>
+
+          <section class="card kid-card kid-card--send" style="margin-bottom:16px;">
+            <h3 class="kid-section-title">📝 Activities for me</h3>
+            <p class="panel-subtitle kid-sub">Read the note, solve, and submit</p>
+            <div class="section-stack">
+              ${assignments.length
+                ? assignments.map(renderStudentAssignmentCard).join("")
+                : `
+                  <div class="kid-empty kid-empty--soft">
+                    <span class="kid-empty__emoji" aria-hidden="true">${theme.bag}</span>
+                    <h3>No activities yet</h3>
+                    <p>When your teacher assigns homework, it shows here.</p>
+                  </div>
+                `}
+            </div>
+          </section>
+
+          <div class="dashboard-columns kid-hw-columns">
+            <section class="card kid-card kid-card--send">
+              <h3 class="kid-section-title">${theme.send} Class photos</h3>
+              <p class="panel-subtitle kid-sub">Optional photo homework for classes</p>
               <div class="section-stack">
-                ${classes.length ? classes.map(renderStudentHomeworkCard).join("") : renderEmptyState("No classes yet", "Homework unlocks after a class is scheduled.")}
+                ${classes.length
+                  ? classes.map(renderStudentHomeworkCard).join("")
+                  : `
+                    <div class="kid-empty kid-empty--soft">
+                      <span class="kid-empty__emoji" aria-hidden="true">📷</span>
+                      <h3>No class photos needed</h3>
+                      <p>Photo upload appears when classes exist.</p>
+                    </div>
+                  `}
               </div>
             </section>
 
-            <section class="card kid-card">
-              <h3>My results 🌟</h3>
-              <p class="panel-subtitle">Scores and teacher notes</p>
+            <section class="card kid-card kid-card--stars">
+              <h3 class="kid-section-title">${theme.trophy} ${escapeHtml(theme.trophyTitle)}</h3>
+              <p class="panel-subtitle kid-sub">Scores & teacher cheers</p>
               <div class="section-stack">
-                ${submissions.length ? submissions.map(renderStudentSubmissionCard).join("") : renderEmptyState("No uploads yet", "Send a homework photo to see feedback here.")}
+                ${[...assignmentSubs.map(renderStudentAssignmentResultCard), ...submissions.map(renderStudentSubmissionCard)].length
+                  ? `${assignmentSubs.map(renderStudentAssignmentResultCard).join("")}${submissions.map(renderStudentSubmissionCard).join("")}`
+                  : `
+                    <div class="kid-empty kid-empty--soft">
+                      <span class="kid-empty__emoji" aria-hidden="true">${theme.trophyEmpty}</span>
+                      <h3>Shelf is empty</h3>
+                      <p>Submit activities to earn feedback!</p>
+                    </div>
+                  `}
               </div>
             </section>
           </div>
         `}
         ${renderMessage()}
       </section>
+    `;
+  }
+
+  function renderStudentAssignmentCard(assignment) {
+    const existing = (state.assignmentSubmissions || []).find((entry) => entry.assignmentId === assignment.id);
+    const questions = Array.isArray(assignment.questions) ? assignment.questions : [];
+    return `
+      <article class="card card--soft kid-hw-card">
+        <div class="card__top">
+          <div>
+            <h3>${escapeHtml(assignment.title)}</h3>
+            <p class="panel-subtitle kid-sub">${escapeHtml(assignment.teacherName || "Teacher")} · ${escapeHtml(assignment.activityType || "practice")}</p>
+          </div>
+          <span class="status-pill ${existing ? "" : "pending"}">${existing ? "✅ Sent" : "📝 To do"}</span>
+        </div>
+        <p class="class-details">${escapeHtml(assignment.instructions || "")}</p>
+        ${assignment.revisionNotes ? `
+          <div class="feedback-note">
+            <strong>📚 Revise</strong>
+            <p>${escapeHtml(assignment.revisionNotes)}</p>
+          </div>
+        ` : ""}
+        <form class="form-grid" data-form="submit-assignment" data-assignment-id="${escapeAttribute(assignment.id)}">
+          ${questions.map((question, index) => `
+            <div class="field">
+              <label for="ans-${escapeAttribute(assignment.id)}-${index}">${escapeHtml(question.prompt)}</label>
+              <textarea id="ans-${escapeAttribute(assignment.id)}-${index}" name="answer-${escapeAttribute(question.id)}" maxlength="1000" placeholder="${escapeAttribute(question.hint || "Write your answer")}">${escapeHtml(existing && Array.isArray(existing.answers) ? ((existing.answers.find((a) => a.questionId === question.id) || {}).text || "") : "")}</textarea>
+            </div>
+          `).join("")}
+          <div class="field">
+            <label for="text-${escapeAttribute(assignment.id)}">Your work / notes</label>
+            <textarea id="text-${escapeAttribute(assignment.id)}" name="textResponse" maxlength="2000" placeholder="Explain what you did...">${escapeHtml(existing ? existing.textResponse || "" : "")}</textarea>
+          </div>
+          <div class="field">
+            <label for="photo-${escapeAttribute(assignment.id)}">Photo (optional)</label>
+            <input id="photo-${escapeAttribute(assignment.id)}" name="homework" type="file" accept="image/*" capture="environment">
+          </div>
+          <button class="btn primary kid-join" type="submit">${existing ? "Update work" : "Submit activity"}</button>
+        </form>
+      </article>
+    `;
+  }
+
+  function renderStudentAssignmentResultCard(submission) {
+    const assignment = (state.assignments || []).find((entry) => entry.id === submission.assignmentId);
+    return `
+      <article class="submission-card kid-result-card">
+        <div class="submission-top">
+          <div>
+            <h3>${assignment ? escapeHtml(assignment.title) : "Activity"}</h3>
+            <p class="kid-sub">Sent ${escapeHtml(formatDate(submission.submittedAt))}</p>
+          </div>
+          <span class="status-pill ${submission.score ? "" : "pending"}">${submission.score ? `⭐ ${escapeHtml(submission.score)}` : "⏳ Waiting"}</span>
+        </div>
+        ${submission.feedback ? `
+          <div class="feedback-note">
+            <strong>Teacher note</strong>
+            <p>${escapeHtml(submission.feedback)}</p>
+          </div>
+        ` : ""}
+      </article>
+    `;
+  }
+
+  function renderKidThemePicker(activeTheme) {
+    return `
+      <div class="kid-theme-picker" role="group" aria-label="Choose theme">
+        <div class="kid-theme-picker__label">
+          <strong>Theme</strong>
+          <span>Game (Mech) or Play (colorful)</span>
+        </div>
+        <div class="kid-theme-picker__row">
+          ${Object.values(KID_THEMES).map((theme) => `
+            <button
+              class="kid-theme-chip kid-theme-chip--${escapeAttribute(theme.id)}${theme.id === activeTheme.id ? " is-active" : ""}"
+              type="button"
+              data-action="set-kid-theme"
+              data-theme="${escapeAttribute(theme.id)}"
+              aria-pressed="${theme.id === activeTheme.id ? "true" : "false"}"
+              title="${escapeAttribute(theme.label)}"
+            >
+              <span class="kid-theme-chip__emoji" aria-hidden="true">${theme.emoji}</span>
+              <span class="kid-theme-chip__name">${escapeHtml(theme.label)}</span>
+            </button>
+          `).join("")}
+        </div>
+      </div>
     `;
   }
 
@@ -414,6 +1312,7 @@
 
   function renderTeacherClassFormPanel({ editingClass, formMeetingMode, formManualLink, formStudentId, formButtonLabel, formTitle, formIntro }) {
     const manualLinkCopy = getManualLinkCopy(getMeetingOptionProvider(formMeetingMode));
+    const schedulableStudents = getSchedulableStudents();
     const isSeries = !editingClass && state.scheduleMode === "series";
     const monthBounds = getDefaultSeriesMonthBounds();
     const weekdayOptions = [
@@ -439,13 +1338,14 @@
         <form class="form-grid" data-form="schedule-class">
           <div class="field">
             <label for="studentIds">Kid</label>
-            <select id="studentIds" name="studentIds" ${state.students.length ? "required" : "disabled"}>
-              <option value="">${state.students.length ? "Select kid" : "No kids yet"}</option>
-              ${state.students.map((student) => `
+            <select id="studentIds" name="studentIds" ${schedulableStudents.length ? "required" : "disabled"}>
+              <option value="">${schedulableStudents.length ? "Select kid" : "No active kids yet"}</option>
+              ${schedulableStudents.map((student) => `
                 <option value="${escapeAttribute(student.id)}"${formStudentId === student.id ? " selected" : ""}>${escapeHtml(student.name)}</option>
               `).join("")}
             </select>
-            ${state.students.length ? "" : '<p class="calendar-empty">Create and activate student accounts first.</p>'}
+            ${schedulableStudents.length ? "" : '<p class="calendar-empty">Create and activate student accounts first.</p>'}
+            ${renderPendingKidsHint()}
           </div>
 
           ${editingClass ? "" : `
@@ -487,6 +1387,11 @@
                     <span>${day.label}</span>
                   </label>
                 `).join("")}
+              </div>
+              <div class="weekday-actions">
+                <button class="btn ghost" type="button" data-action="set-weekdays" data-preset="weekdays">Mon–Fri</button>
+                <button class="btn ghost" type="button" data-action="set-weekdays" data-preset="all">Every day</button>
+                <button class="btn ghost" type="button" data-action="set-weekdays" data-preset="none">Clear</button>
               </div>
             </div>
             <div class="field">
@@ -577,6 +1482,9 @@
     const meetingProvider = getClassMeetingProvider(classItem);
     const meetingLink = getClassMeetingLink(classItem);
     const driveLink = safeExternalUrl(classItem.driveLink);
+    const seriesCount = classItem.seriesId
+      ? state.classes.filter((entry) => entry.seriesId === classItem.seriesId).length
+      : 1;
 
     return `
       <section class="card class-panel">
@@ -604,8 +1512,41 @@
           ${driveLink ? renderExternalAction(driveLink, "secondary", "Drive", "Drive unavailable") : ""}
           ${meetingLink ? `<button class="btn ghost" type="button" data-action="copy-link" data-link="${escapeAttribute(meetingLink)}">Copy link</button>` : ""}
         </div>
+        <div class="class-actions class-actions--danger">
+          <button class="btn danger" type="button" data-action="cancel-class" data-class-id="${escapeAttribute(classItem.id)}" data-scope="single">Cancel this class</button>
+          ${seriesCount > 1
+            ? `<button class="btn danger ghost-danger" type="button" data-action="cancel-class" data-class-id="${escapeAttribute(classItem.id)}" data-scope="series">Cancel whole series (${seriesCount})</button>`
+            : ""}
+        </div>
       </section>
     `;
+  }
+
+  function getListedTeacherClasses(allClasses, upcomingClasses, pastClasses) {
+    if (state.classListFilter === "past") {
+      return {
+        items: pastClasses,
+        subtitle: "Classes already finished, newest first",
+        emptyTitle: "No past classes yet",
+        emptyHint: "Finished classes move here automatically."
+      };
+    }
+
+    if (state.classListFilter === "all") {
+      return {
+        items: [...allClasses].reverse(),
+        subtitle: "Every class on the calendar, newest first",
+        emptyTitle: "No classes yet",
+        emptyHint: "Schedule a class or a monthly series to fill this list."
+      };
+    }
+
+    return {
+      items: upcomingClasses,
+      subtitle: "Next classes at a glance",
+      emptyTitle: "No upcoming classes",
+      emptyHint: "Schedule a class or a monthly series to fill this list."
+    };
   }
 
   function renderTeacherClassCard(classItem) {
@@ -630,26 +1571,46 @@
     `;
   }
 
+  function renderStudentPastClassCard(classItem) {
+    const submission = state.submissions.find((entry) => entry.classId === classItem.id);
+    return `
+      <article class="card card--compact kid-past-card">
+        <div class="card__top">
+          <h3>${escapeHtml(getClassTitle(classItem))}</h3>
+          <span class="status-pill">${escapeHtml(formatDate(classItem.dateTime))}</span>
+        </div>
+        <div class="card__meta">
+          <span>👩‍🏫 ${escapeHtml(classItem.teacherName || "Your teacher")}${submission && submission.score ? ` · ⭐ ${escapeHtml(submission.score)}` : ""}</span>
+        </div>
+      </article>
+    `;
+  }
+
   function renderStudentClassCard(classItem) {
+    const theme = getKidTheme();
     const existingSubmission = state.submissions.find((submission) => submission.classId === classItem.id);
     const meetingProvider = getClassMeetingProvider(classItem);
     const meetingLink = getClassMeetingLink(classItem);
     const driveLink = safeExternalUrl(classItem.driveLink);
+    const icon = getKidClassIcon(classItem);
     return `
       <article class="card kid-class-card">
         <div class="card__top">
-          <div>
-            <h3>${escapeHtml(getClassTitle(classItem))}</h3>
-            <p class="panel-subtitle">${escapeHtml(formatDate(classItem.dateTime))}</p>
+          <div class="kid-class-title">
+            <span class="kid-class-icon" aria-hidden="true">${icon}</span>
+            <div>
+              <h3>${escapeHtml(getClassTitle(classItem))}</h3>
+              <p class="panel-subtitle kid-sub">🗓️ ${escapeHtml(formatDate(classItem.dateTime))}</p>
+            </div>
           </div>
-          <span class="status-pill ${existingSubmission ? "" : "pending"}">${existingSubmission ? "HW done ✓" : "HW open"}</span>
+          <span class="status-pill ${existingSubmission ? "" : "pending"}">${existingSubmission ? "✅ Done" : "🎯 Open"}</span>
         </div>
         <div class="card__meta">
-          <span>Teacher: ${escapeHtml(classItem.teacherName || "Teacher")}</span>
+          <span>👩‍🏫 ${escapeHtml(classItem.teacherName || "Teacher")}</span>
         </div>
         <div class="class-actions">
-          ${renderExternalAction(meetingLink, "primary kid-join", "Join class 🚀", getMeetingUnavailableLabel(meetingProvider))}
-          ${driveLink ? renderExternalAction(driveLink, "secondary", "Materials", "No materials") : ""}
+          ${renderExternalAction(meetingLink, "primary kid-join", theme.join, getMeetingUnavailableLabel(meetingProvider))}
+          ${driveLink ? renderExternalAction(driveLink, "secondary kid-secondary", "Docs 📄", "No docs") : ""}
         </div>
       </article>
     `;
@@ -658,32 +1619,36 @@
   function renderStudentHomeworkCard(classItem) {
     const existingSubmission = state.submissions.find((submission) => submission.classId === classItem.id);
     const driveLink = safeExternalUrl(classItem.driveLink);
+    const icon = getKidClassIcon(classItem);
 
     return `
-      <article class="card card--soft kid-card">
+      <article class="card card--soft kid-card kid-hw-card">
         <div class="card__top">
-          <div>
-            <h3>${escapeHtml(getClassTitle(classItem))}</h3>
-            <p class="panel-subtitle">${escapeHtml(formatDate(classItem.dateTime))}</p>
+          <div class="kid-class-title">
+            <span class="kid-class-icon" aria-hidden="true">${icon}</span>
+            <div>
+              <h3>${escapeHtml(getClassTitle(classItem))}</h3>
+              <p class="panel-subtitle kid-sub">🗓️ ${escapeHtml(formatDate(classItem.dateTime))}</p>
+            </div>
           </div>
-          <span class="status-pill ${existingSubmission ? "" : "pending"}">${existingSubmission ? "Sent ✓" : "To do"}</span>
+          <span class="status-pill ${existingSubmission ? "" : "pending"}">${existingSubmission ? "✅ Sent" : "📝 To do"}</span>
         </div>
         <div class="card__meta">
-          <span>Teacher: ${escapeHtml(classItem.teacherName || "Teacher")}</span>
-          ${driveLink ? `<span>Materials ready</span>` : ""}
+          <span>👩‍🏫 ${escapeHtml(classItem.teacherName || "Teacher")}</span>
+          ${driveLink ? `<span>📄 Materials ready</span>` : ""}
         </div>
         ${existingSubmission && existingSubmission.feedback ? `
           <div class="feedback-note">
-            <strong>Teacher comment</strong>
+            <strong>💬 Teacher says</strong>
             <p>${escapeHtml(existingSubmission.feedback)}</p>
           </div>
         ` : ""}
         <form class="form-grid" data-form="upload-homework" data-class-id="${classItem.id}">
           <div class="field">
-            <label for="homework-${classItem.id}">${existingSubmission ? "Send a new photo" : "Pick a homework photo"}</label>
+            <label for="homework-${classItem.id}">${existingSubmission ? "📷 New photo" : "📷 Pick a photo"}</label>
             <input id="homework-${classItem.id}" name="homework" type="file" accept="image/*" capture="environment" required>
           </div>
-          <button class="btn primary kid-join" type="submit">${existingSubmission ? "Update ✨" : "Send homework 📤"}</button>
+          <button class="btn primary kid-join" type="submit">${existingSubmission ? "Update ✨" : "Send 📤"}</button>
         </form>
       </article>
     `;
@@ -770,20 +1735,20 @@
   function renderStudentSubmissionCard(submission) {
     const linkedClass = state.classes.find((classItem) => classItem.id === submission.classId);
     const statusClass = submission.score ? "status-pill" : "status-pill pending";
-    const statusText = submission.score ? `Ranked ${escapeHtml(submission.score)}` : "Waiting for teacher";
+    const statusText = submission.score ? `⭐ ${escapeHtml(submission.score)}` : "⏳ Waiting";
 
     return `
-      <article class="submission-card">
+      <article class="submission-card kid-result-card">
         <div class="submission-top">
           <div>
-            <h3>${linkedClass ? escapeHtml(getClassTitle(linkedClass)) : "Submitted homework"}</h3>
-            <p>${escapeHtml(submission.subject)} with ${linkedClass ? escapeHtml(linkedClass.teacherName) : "your teacher"}</p>
+            <h3>${linkedClass ? escapeHtml(getClassTitle(linkedClass)) : "Your homework"}</h3>
+            <p class="kid-sub">${escapeHtml(submission.subject || "Class")} · 👩‍🏫 ${linkedClass ? escapeHtml(linkedClass.teacherName) : "Teacher"}</p>
           </div>
           <span class="${statusClass}">${statusText}</span>
         </div>
         <img class="homework-preview" src="${escapeAttribute(submission.imageUrl)}" alt="Homework uploaded by student">
         <div class="submission-meta">
-          <span><strong>Uploaded:</strong> ${formatDate(submission.submittedAt)}</span>
+          <span>📤 Sent ${formatDate(submission.submittedAt)}</span>
         </div>
         <div class="feedback-note">
           <strong>Teacher comment</strong>
@@ -812,12 +1777,256 @@
 
   function renderDashboardTabs(options = {}) {
     const kid = Boolean(options.kid);
+    const theme = options.theme || getKidTheme();
+    const isTeacher = state.user && state.user.role === "teacher";
     return `
       <div class="tab-bar${kid ? " tab-bar--kid" : ""}" role="tablist" aria-label="Dashboard sections">
-        <button class="tab-pill ${state.dashboardTab === "meetings" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.dashboardTab === "meetings"}" data-action="set-dashboard-tab" data-tab="meetings">${kid ? "My classes" : "Classes"}</button>
-        <button class="tab-pill ${state.dashboardTab === "homework" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.dashboardTab === "homework"}" data-action="set-dashboard-tab" data-tab="homework">Homework</button>
+        <button class="tab-pill ${state.dashboardTab === "meetings" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.dashboardTab === "meetings"}" data-action="set-dashboard-tab" data-tab="meetings">${kid ? `${theme.hero} Classes` : "Classes"}</button>
+        <button class="tab-pill ${state.dashboardTab === "progress" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.dashboardTab === "progress"}" data-action="set-dashboard-tab" data-tab="progress">${kid ? `${theme.progress} Progress` : "Progress"}</button>
+        <button class="tab-pill ${state.dashboardTab === "homework" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.dashboardTab === "homework"}" data-action="set-dashboard-tab" data-tab="homework">${kid ? `${theme.mission} Homework` : "Homework"}</button>
+        ${isTeacher
+          ? `<button class="tab-pill ${state.dashboardTab === "coach" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.dashboardTab === "coach"}" data-action="set-dashboard-tab" data-tab="coach">AI Coach</button>`
+          : ""}
       </div>
     `;
+  }
+
+  function renderClassProgressPanel(options = {}) {
+    const kid = Boolean(options.kid);
+    const theme = options.theme || getKidTheme();
+    const isTeacher = state.user && state.user.role === "teacher";
+    const selectedKid = getSelectedCalendarStudent();
+    const scopedClasses = getProgressScopedClasses(state.classes);
+    const stats = getClassProgress(scopedClasses);
+    const conducted = [...stats.conducted].sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
+    const upcoming = [...stats.upcoming].sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
+    const uniqueTopics = getUniqueTopics(conducted);
+    const kidRows = isTeacher && state.selectedCalendarStudentId === "all"
+      ? getKidProgressRows(getProgressPeriodClasses(state.classes))
+      : [];
+    const periodLabel = state.progressPeriod === "month" ? "this month" : "all time";
+    const audienceLabel = selectedKid
+      ? selectedKid.name
+      : (isTeacher ? "all kids" : (state.user && state.user.name) || "this student");
+    const fillPercent = stats.percent;
+
+    return `
+      <section class="card${kid ? " kid-card kid-progress-card" : ""}">
+        <div class="section-heading progress-heading">
+          <div>
+            <h3 class="${kid ? "kid-section-title" : ""}">${kid ? `${theme.progress} ${escapeHtml(theme.progressTitle)}` : "Class progress"}</h3>
+            <p class="panel-subtitle${kid ? " kid-sub" : ""}">${escapeHtml(audienceLabel)} · ${escapeHtml(periodLabel)}. A class counts as done after its scheduled time ends.</p>
+          </div>
+          <div class="progress-toolbar">
+            <div class="view-toggle" role="group" aria-label="Progress period">
+              <button class="btn ${state.progressPeriod === "all" ? "primary" : "secondary"}" type="button" data-action="progress-period" data-period="all">All time</button>
+              <button class="btn ${state.progressPeriod === "month" ? "primary" : "secondary"}" type="button" data-action="progress-period" data-period="month">This month</button>
+            </div>
+            ${isTeacher ? `
+              <label class="calendar-select">
+                <span>Kid</span>
+                <select name="calendarStudentId">
+                  <option value="all"${state.selectedCalendarStudentId === "all" ? " selected" : ""}>All kids</option>
+                  ${getCalendarStudentOptions().map((student) => `
+                    <option value="${escapeAttribute(student.id)}"${state.selectedCalendarStudentId === student.id ? " selected" : ""}>
+                      ${escapeHtml(student.name)}
+                    </option>
+                  `).join("")}
+                </select>
+              </label>
+            ` : ""}
+          </div>
+        </div>
+
+        <div class="summary-strip progress-summary">
+          <article class="summary-card">
+            <span>Scheduled</span>
+            <strong>${stats.scheduled}</strong>
+            <small>Classes on the calendar</small>
+          </article>
+          <article class="summary-card">
+            <span>Conducted</span>
+            <strong>${stats.conducted.length}</strong>
+            <small>Finished classes</small>
+          </article>
+          <article class="summary-card">
+            <span>Upcoming</span>
+            <strong>${stats.upcoming.length}</strong>
+            <small>Still to take</small>
+          </article>
+          <article class="summary-card">
+            <span>Topics covered</span>
+            <strong>${uniqueTopics.length}</strong>
+            <small>${fillPercent}% complete</small>
+          </article>
+        </div>
+
+        <div class="progress-meter" role="img" aria-label="${fillPercent} percent of scheduled classes completed">
+          <div class="progress-meter__top">
+            <strong>${stats.conducted.length} of ${stats.scheduled} done</strong>
+            <span>${fillPercent}%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" style="width: ${fillPercent}%"></div>
+          </div>
+        </div>
+
+        ${!stats.scheduled ? renderEmptyState(
+          kid ? "No classes to track yet" : "No classes scheduled",
+          kid ? "When your teacher books a class, progress and topics will show up here for you and your parent." : "Schedule a class or month series to start tracking progress."
+        ) : `
+          <div class="dashboard-columns progress-columns">
+            <section>
+              <div class="section-heading">
+                <div>
+                  <h3>${kid ? "Topics we covered" : "Topics covered"}</h3>
+                  <p class="panel-subtitle${kid ? " kid-sub" : ""}">${uniqueTopics.length} topic${uniqueTopics.length === 1 ? "" : "s"} from finished classes</p>
+                </div>
+              </div>
+              ${uniqueTopics.length ? `
+                <div class="progress-topic-chips">
+                  ${uniqueTopics.map((topic) => `<span class="progress-chip">${escapeHtml(topic.label)}</span>`).join("")}
+                </div>
+              ` : ""}
+              <div class="section-stack progress-topic-list">
+                ${conducted.length
+                  ? conducted.map((classItem) => renderProgressClassRow(classItem, { kid, done: true })).join("")
+                  : renderEmptyState("None finished yet", "Finished classes and their topics will collect here.")}
+              </div>
+            </section>
+            <section>
+              <div class="section-heading">
+                <div>
+                  <h3>${kid ? "Coming up next" : "Upcoming topics"}</h3>
+                  <p class="panel-subtitle${kid ? " kid-sub" : ""}">${upcoming.length} class${upcoming.length === 1 ? "" : "es"} still scheduled</p>
+                </div>
+              </div>
+              <div class="section-stack progress-topic-list">
+                ${upcoming.length
+                  ? upcoming.slice(0, 12).map((classItem) => renderProgressClassRow(classItem, { kid, done: false })).join("")
+                  : renderEmptyState("All caught up", "No remaining classes in this view.")}
+              </div>
+            </section>
+          </div>
+        `}
+      </section>
+
+      ${kidRows.length ? `
+        <section class="card" style="margin-top:16px;">
+          <div class="section-heading">
+            <div>
+              <h3>Progress by kid</h3>
+              <p class="panel-subtitle">Tap a row to focus on that student</p>
+            </div>
+          </div>
+          <div class="progress-table-wrap">
+            <table class="progress-table">
+              <thead>
+                <tr>
+                  <th>Kid</th>
+                  <th>Scheduled</th>
+                  <th>Done</th>
+                  <th>Left</th>
+                  <th>Progress</th>
+                  <th>Last topic</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${kidRows.map((row) => `
+                  <tr data-action="filter-progress-kid" data-student-id="${escapeAttribute(row.student.id)}" tabindex="0">
+                    <td><strong>${escapeHtml(row.student.name)}</strong></td>
+                    <td>${row.stats.scheduled}</td>
+                    <td>${row.stats.conducted.length}</td>
+                    <td>${row.stats.upcoming.length}</td>
+                    <td>
+                      <div class="progress-mini">
+                        <span class="progress-track progress-track--mini"><span class="progress-fill" style="width: ${row.stats.percent}%"></span></span>
+                        <em>${row.stats.percent}%</em>
+                      </div>
+                    </td>
+                    <td>${escapeHtml(row.lastTopic)}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ` : ""}
+    `;
+  }
+
+  function renderProgressClassRow(classItem, options = {}) {
+    const kid = Boolean(options.kid);
+    const done = Boolean(options.done);
+    const icon = kid ? getKidClassIcon(classItem) : (done ? "✓" : "•");
+    const kidNames = formatStudentNames(classItem.studentNames);
+    return `
+      <article class="progress-topic${done ? " is-done" : ""}">
+        <span class="progress-topic__icon" aria-hidden="true">${icon}</span>
+        <div>
+          <strong>${escapeHtml(getClassTitle(classItem))}</strong>
+          <p>${escapeHtml(classItem.subject || "Class")} · ${escapeHtml(formatDate(classItem.dateTime))}${state.user.role === "teacher" ? ` · ${escapeHtml(kidNames)}` : ""}</p>
+        </div>
+        <span class="status-pill ${done ? "" : "pending"}">${done ? "Done" : "Scheduled"}</span>
+      </article>
+    `;
+  }
+
+  function loadKidThemeId() {
+    try {
+      const saved = String(window.localStorage.getItem(KID_THEME_STORAGE_KEY) || "").trim();
+      if (KID_THEMES[saved]) {
+        return saved;
+      }
+    } catch (_error) {
+      // ignore storage failures
+    }
+    return "play";
+  }
+
+  function getKidTheme() {
+    return KID_THEMES[state.kidTheme] || KID_THEMES.play;
+  }
+
+  function setKidTheme(themeId) {
+    const next = KID_THEMES[themeId] ? themeId : "play";
+    state.kidTheme = next;
+    try {
+      window.localStorage.setItem(KID_THEME_STORAGE_KEY, next);
+    } catch (_error) {
+      // ignore storage failures
+    }
+    applyKidThemeClass(next);
+    renderApp({ type: "success", text: `${KID_THEMES[next].emoji} Theme set to ${KID_THEMES[next].label}!` });
+  }
+
+  function applyKidThemeClass(themeId) {
+    clearKidThemeClasses();
+    const id = KID_THEMES[themeId] ? themeId : "play";
+    document.body.classList.add(`kid-theme-${id}`);
+  }
+
+  function clearKidThemeClasses() {
+    Object.keys(KID_THEMES).forEach((id) => {
+      document.body.classList.remove(`kid-theme-${id}`);
+    });
+  }
+
+  function getKidClassIcon(classItem) {
+    const seed = String(classItem.subject || classItem.topic || classItem.id || "class").toLowerCase();
+    if (seed.includes("math") || seed.includes("maths") || seed.includes("number")) return "🔢";
+    if (seed.includes("english") || seed.includes("read") || seed.includes("write")) return "📖";
+    if (seed.includes("science") || seed.includes("bio") || seed.includes("chem")) return "🔬";
+    if (seed.includes("art") || seed.includes("draw") || seed.includes("paint")) return "🎨";
+    if (seed.includes("music") || seed.includes("song")) return "🎵";
+    if (seed.includes("code") || seed.includes("computer") || seed.includes("tech")) return "💻";
+    if (seed.includes("sport") || seed.includes("pe") || seed.includes("fit")) return "⚽";
+    const icons = ["📘", "📗", "📙", "💡", "🧩", "🌟", "✏️", "🎒"];
+    let total = 0;
+    for (const character of seed) {
+      total += character.charCodeAt(0);
+    }
+    return icons[total % icons.length];
   }
 
   function renderCalendarControls({ title, showKidFilter }) {
@@ -968,6 +2177,11 @@
       return;
     }
 
+    if (formType === "verify-2fa") {
+      await verifyTwoFactor(new FormData(form));
+      return;
+    }
+
     if (formType === "register") {
       await registerUser(new FormData(form));
       return;
@@ -988,6 +2202,25 @@
       return;
     }
 
+    if (formType === "create-assignment") {
+      await createAssignment(new FormData(form));
+      return;
+    }
+
+    if (formType === "submit-assignment") {
+      await submitAssignment(form);
+      return;
+    }
+
+    if (formType === "grade-assignment") {
+      await gradeAssignmentSubmission(form, new FormData(form));
+      return;
+    }
+
+    if (formType === "ai-coach") {
+      await runAiCoach(new FormData(form));
+      return;
+    }
   }
 
   function handleClick(event) {
@@ -1019,24 +2252,96 @@
     }
 
     if (actionButton.dataset.action === "set-auth-mode") {
-      state.authMode = actionButton.dataset.mode === "register" && state.authRole !== "admin" ? "register" : "login";
+      state.authMode = actionButton.dataset.mode === "register" ? "register" : "login";
+      state.pending2fa = null;
       renderApp();
       return;
     }
 
-    if (actionButton.dataset.action === "set-auth-role") {
-      state.authRole = ["student", "teacher", "admin"].includes(actionButton.dataset.role) ? actionButton.dataset.role : "teacher";
-      state.registerRole = state.authRole;
-      if (state.authRole === "admin") {
-        state.authMode = "login";
-      }
+    if (actionButton.dataset.action === "cancel-2fa") {
+      state.authMode = "login";
+      state.pending2fa = null;
       renderApp();
+      return;
+    }
+
+    if (actionButton.dataset.action === "resend-2fa") {
+      void resendTwoFactor();
+      return;
+    }
+
+    if (actionButton.dataset.action === "copy-otp") {
+      const code = actionButton.dataset.code || "";
+      if (code && navigator.clipboard && navigator.clipboard.writeText) {
+        void navigator.clipboard.writeText(code).then(() => {
+          actionButton.textContent = "Copied!";
+          window.setTimeout(() => {
+            actionButton.textContent = "Copy code";
+          }, 1200);
+        });
+      }
       return;
     }
 
     if (actionButton.dataset.action === "set-dashboard-tab") {
-      state.dashboardTab = actionButton.dataset.tab === "homework" ? "homework" : "meetings";
+      const tab = actionButton.dataset.tab;
+      state.dashboardTab = isDashboardTab(tab) ? tab : "meetings";
       renderApp();
+      return;
+    }
+
+    if (actionButton.dataset.action === "set-weekdays") {
+      const preset = actionButton.dataset.preset;
+      const wanted = preset === "all"
+        ? new Set(["0", "1", "2", "3", "4", "5", "6"])
+        : preset === "none"
+          ? new Set()
+          : new Set(["1", "2", "3", "4", "5"]);
+      app.querySelectorAll('input[name="seriesWeekdays"]').forEach((input) => {
+        input.checked = wanted.has(input.value);
+      });
+      return;
+    }
+
+    if (actionButton.dataset.action === "set-class-filter") {
+      const filter = actionButton.dataset.filter;
+      state.classListFilter = ["upcoming", "past", "all"].includes(filter) ? filter : "upcoming";
+      renderApp();
+      return;
+    }
+
+    if (actionButton.dataset.action === "progress-period") {
+      state.progressPeriod = actionButton.dataset.period === "month" ? "month" : "all";
+      renderApp();
+      return;
+    }
+
+    if (actionButton.dataset.action === "filter-progress-kid") {
+      state.selectedCalendarStudentId = actionButton.dataset.studentId || "all";
+      state.dashboardTab = "progress";
+      renderApp();
+      return;
+    }
+
+    if (actionButton.dataset.action === "ai-fill-homework") {
+      void runAiCoach(null, "homework");
+      return;
+    }
+
+    if (actionButton.dataset.action === "ai-use-as-homework") {
+      state.dashboardTab = "homework";
+      renderApp({ type: "success", text: "AI draft loaded into the homework form." });
+      return;
+    }
+
+    if (actionButton.dataset.action === "ai-clear-draft") {
+      state.aiDraft = null;
+      renderApp();
+      return;
+    }
+
+    if (actionButton.dataset.action === "set-kid-theme") {
+      setKidTheme(actionButton.dataset.theme);
       return;
     }
 
@@ -1044,18 +2349,21 @@
       state.selectedClassId = actionButton.dataset.classId || null;
       state.isEditingClass = false;
       state.dashboardTab = "meetings";
+      discardFormDraft("schedule-class");
       renderApp();
       return;
     }
 
     if (actionButton.dataset.action === "cancel-class-edit") {
       state.isEditingClass = false;
+      discardFormDraft("schedule-class");
       renderApp();
       return;
     }
 
     if (actionButton.dataset.action === "start-class-edit") {
       state.isEditingClass = true;
+      discardFormDraft("schedule-class");
       renderApp();
       return;
     }
@@ -1063,7 +2371,13 @@
     if (actionButton.dataset.action === "clear-class-selection") {
       state.selectedClassId = null;
       state.isEditingClass = false;
+      discardFormDraft("schedule-class");
       renderApp();
+      return;
+    }
+
+    if (actionButton.dataset.action === "cancel-class") {
+      void cancelClass(actionButton.dataset.classId, actionButton.dataset.scope);
       return;
     }
 
@@ -1081,6 +2395,7 @@
     }
 
     if (actionButton.dataset.action === "add-series-time") {
+      syncSeriesTimesFromDom();
       if (state.seriesTimes.length < 6) {
         const last = state.seriesTimes[state.seriesTimes.length - 1] || "16:00";
         const [hours, minutes] = last.split(":").map(Number);
@@ -1093,6 +2408,7 @@
     }
 
     if (actionButton.dataset.action === "remove-series-time") {
+      syncSeriesTimesFromDom();
       const index = Number(actionButton.dataset.index);
       if (Number.isInteger(index) && state.seriesTimes.length > 1) {
         state.seriesTimes = state.seriesTimes.filter((_time, timeIndex) => timeIndex !== index);
@@ -1126,6 +2442,8 @@
     state.user = null;
     state.classes = [];
     state.submissions = [];
+    state.assignments = [];
+    state.assignmentSubmissions = [];
     state.students = [];
     state.managedUsers = [];
     state.zoomConfigured = false;
@@ -1136,6 +2454,7 @@
     state.meetingProvider = "none";
     state.zoomMode = "manual";
     state.dashboardTab = "meetings";
+    state.progressPeriod = "all";
     state.selectedCalendarStudentId = "all";
     state.calendarView = "week";
     state.calendarCursor = createDateKey(new Date());
@@ -1144,11 +2463,32 @@
     state.scheduleMode = "once";
     state.seriesPattern = "weekdays";
     state.seriesTimes = ["16:00"];
+    state.classListFilter = "upcoming";
+    state.pending2fa = null;
+    state.authMode = "login";
+    clearKidThemeClasses();
   }
 
   function handleChange(event) {
     if (event.target.name === "meetingMode") {
       refreshMeetingModeFields(event.target.form);
+      return;
+    }
+
+    if (event.target.name === "role" && event.target.matches("[data-register-role]")) {
+      state.registerRole = event.target.value === "teacher" ? "teacher" : "student";
+      const subjectField = event.target.form && event.target.form.querySelector("[data-register-subject-field]");
+      if (subjectField) {
+        subjectField.hidden = state.registerRole !== "teacher";
+      }
+      const nameLabel = event.target.form && event.target.form.querySelector('label[for="register-name"]');
+      const nameInput = event.target.form && event.target.form.querySelector("#register-name");
+      if (nameLabel) {
+        nameLabel.textContent = state.registerRole === "teacher" ? "Name" : "Kid's name";
+      }
+      if (nameInput) {
+        nameInput.placeholder = state.registerRole === "teacher" ? "Your name" : "Student name";
+      }
       return;
     }
 
@@ -1224,14 +2564,85 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          role: String(formData.get("role") || state.authRole || "").trim(),
           email: String(formData.get("email") || "").trim(),
           password: String(formData.get("password") || "").trim()
         })
       });
 
+      if (payload.requires2fa) {
+        state.authMode = "2fa";
+        state.pending2fa = {
+          challengeId: payload.challengeId,
+          devCode: payload.devCode || "",
+          delivery: payload.delivery || "local",
+          maskedPhone: payload.maskedPhone || ""
+        };
+        renderApp({
+          type: "success",
+          text: payload.message || "Enter your verification code."
+        });
+        return;
+      }
+
       applyDashboardPayload(payload.dashboard);
+      state.pending2fa = null;
+      state.authMode = "login";
       renderApp({ type: "success", text: `Welcome back, ${payload.user.name}.` });
+    } catch (error) {
+      renderApp({ type: "error", text: error.message });
+    }
+  }
+
+  async function verifyTwoFactor(formData) {
+    try {
+      const payload = await api("/api/login/verify-2fa", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: state.pending2fa ? state.pending2fa.challengeId : "",
+          code: String(formData.get("code") || "").trim().replace(/\s+/g, "")
+        })
+      });
+
+      state.pending2fa = null;
+      state.authMode = "login";
+      applyDashboardPayload(payload.dashboard);
+      renderApp({
+        type: "success",
+        text: payload.message || `Welcome back, ${payload.user.name}.`
+      });
+    } catch (error) {
+      renderApp({ type: "error", text: error.message });
+    }
+  }
+
+  async function resendTwoFactor() {
+    if (!state.pending2fa || !state.pending2fa.challengeId) {
+      state.authMode = "login";
+      renderApp({ type: "error", text: "Session expired. Please sign in again." });
+      return;
+    }
+
+    try {
+      const payload = await api("/api/login/resend-2fa", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: state.pending2fa.challengeId
+        })
+      });
+
+      state.authMode = "2fa";
+      state.pending2fa = {
+        challengeId: payload.challengeId,
+        devCode: payload.devCode || "",
+        delivery: payload.delivery || "local",
+        maskedPhone: payload.maskedPhone || ""
+      };
+      renderApp({
+        type: "success",
+        text: payload.message || "A new verification code is ready."
+      });
     } catch (error) {
       renderApp({ type: "error", text: error.message });
     }
@@ -1239,14 +2650,16 @@
 
   async function registerUser(formData) {
     try {
+      const role = String(formData.get("role") || state.registerRole || "student").trim().toLowerCase();
       const payload = await api("/api/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          role: String(formData.get("role") || "student").trim(),
+          role: role === "teacher" ? "teacher" : "student",
           name: String(formData.get("name") || "").trim(),
           subject: String(formData.get("subject") || "").trim(),
           email: String(formData.get("email") || "").trim(),
+          phone: String(formData.get("phone") || "").trim(),
           password: String(formData.get("password") || "").trim()
         })
       });
@@ -1294,6 +2707,7 @@
       const scheduleMode = state.scheduleMode === "series" ? "series" : "once";
       const payload = {
         scheduleMode,
+        timeZone: getBrowserTimeZone(),
         topic: String(formData.get("topic") || "").trim(),
         details: String(formData.get("details") || "").trim(),
         durationMinutes: Number(formData.get("durationMinutes") || 45),
@@ -1325,6 +2739,12 @@
 
       state.selectedClassId = response.classItem ? response.classItem.id : null;
       state.isEditingClass = false;
+      discardFormDraft("schedule-class");
+      // Jump the calendar to the first new class so it is visible straight away
+      // instead of leaving the teacher on a week with nothing in it.
+      if (response.classItem) {
+        focusCalendarOn(response.classItem.dateTime);
+      }
       const successText = response.count > 1
         ? (response.message || `Scheduled ${response.count} classes.`)
         : buildClassSaveMessage(response.classItem, response.message || "Class scheduled successfully.");
@@ -1337,11 +2757,48 @@
     }
   }
 
+  async function cancelClass(classId, scope) {
+    if (!classId) {
+      return;
+    }
+
+    const classItem = state.classes.find((entry) => entry.id === classId);
+    const wholeSeries = scope === "series";
+    const seriesCount = classItem && classItem.seriesId
+      ? state.classes.filter((entry) => entry.seriesId === classItem.seriesId).length
+      : 1;
+    const label = classItem ? getClassTitle(classItem) : "this class";
+    const question = wholeSeries
+      ? `Cancel all ${seriesCount} classes in the "${label}" series? Any homework photos sent for them are removed too.`
+      : `Cancel "${label}"? Any homework photos sent for it are removed too.`;
+
+    if (!window.confirm(question)) {
+      return;
+    }
+
+    try {
+      const response = await api(`/api/classes/${encodeURIComponent(classId)}?scope=${wholeSeries ? "series" : "single"}`, {
+        method: "DELETE"
+      });
+
+      state.selectedClassId = null;
+      state.isEditingClass = false;
+      discardFormDraft("schedule-class");
+      await refreshDashboard({
+        type: "success",
+        text: response.message || "Class cancelled."
+      });
+    } catch (error) {
+      renderApp({ type: "error", text: error.message });
+    }
+  }
+
   async function updateClass(formData) {
     try {
       const manualMeetingLink = String(formData.get("manualMeetingLink") || "").trim();
       const { meetingProvider, meetingMode } = parseMeetingOption(formData.get("meetingMode"));
       const payload = {
+        timeZone: getBrowserTimeZone(),
         topic: String(formData.get("topic") || "").trim(),
         details: String(formData.get("details") || "").trim(),
         dateTime: String(formData.get("dateTime") || "").trim(),
@@ -1362,6 +2819,10 @@
 
       state.selectedClassId = response.classItem ? response.classItem.id : null;
       state.isEditingClass = false;
+      discardFormDraft("schedule-class");
+      if (response.classItem) {
+        focusCalendarOn(response.classItem.dateTime);
+      }
       await refreshDashboard({
         type: "success",
         text: buildClassSaveMessage(response.classItem, response.message || "Class updated successfully.")
@@ -1461,6 +2922,175 @@
     }
   }
 
+  async function createAssignment(formData) {
+    try {
+      const questionsText = String(formData.get("questionsText") || "");
+      const questions = questionsText
+        .split(/\n+/)
+        .map((line) => line.replace(/^\s*\d+[\).\-\:]\s*/, "").trim())
+        .filter(Boolean)
+        .map((prompt, index) => ({ id: `q-${index + 1}`, prompt }));
+
+      const response = await api("/api/assignments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: String(formData.get("title") || "").trim(),
+          instructions: String(formData.get("instructions") || "").trim(),
+          activityType: String(formData.get("activityType") || "practice").trim(),
+          dueAt: String(formData.get("dueAt") || "").trim(),
+          revisionNotes: String(formData.get("revisionNotes") || "").trim(),
+          studentIds: [String(formData.get("studentIds") || "").trim()].filter(Boolean),
+          questions,
+          source: state.aiDraft ? "ai" : "manual"
+        })
+      });
+
+      state.aiDraft = null;
+      discardFormDraft("create-assignment");
+      await refreshDashboard({
+        type: "success",
+        text: response.message || "Homework activity sent."
+      });
+    } catch (error) {
+      renderApp({ type: "error", text: error.message });
+    }
+  }
+
+  async function submitAssignment(form) {
+    const assignmentId = form.dataset.assignmentId;
+    const formData = new FormData(form);
+    const textResponse = String(formData.get("textResponse") || "").trim();
+    const answers = [];
+    for (const [key, value] of formData.entries()) {
+      if (String(key).startsWith("answer-")) {
+        answers.push({
+          questionId: String(key).slice("answer-".length),
+          text: String(value || "").trim()
+        });
+      }
+    }
+
+    const body = new FormData();
+    body.append("textResponse", textResponse);
+    body.append("answers", JSON.stringify(answers));
+    const fileInput = form.querySelector('input[name="homework"]');
+    if (fileInput && fileInput.files && fileInput.files[0]) {
+      body.append("homework", fileInput.files[0]);
+    }
+
+    try {
+      const response = await api(`/api/assignments/${encodeURIComponent(assignmentId)}/submit`, {
+        method: "POST",
+        body
+      });
+      await refreshDashboard({
+        type: "success",
+        text: response.message || "Activity submitted."
+      });
+    } catch (error) {
+      renderApp({ type: "error", text: error.message });
+    }
+  }
+
+  async function gradeAssignmentSubmission(form, formData) {
+    try {
+      const response = await api(`/api/assignment-submissions/${encodeURIComponent(form.dataset.submissionId)}/grade`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          score: String(formData.get("score") || "").trim(),
+          feedback: String(formData.get("feedback") || "").trim()
+        })
+      });
+      await refreshDashboard({
+        type: "success",
+        text: response.message || "Feedback saved."
+      });
+    } catch (error) {
+      renderApp({ type: "error", text: error.message });
+    }
+  }
+
+  async function runAiCoach(formData, forcedTask) {
+    const task = forcedTask || String((formData && formData.get("task")) || "lesson-plan");
+    const payload = {
+      task,
+      topic: formData ? String(formData.get("topic") || "").trim() : (state.aiDraft && state.aiDraft.title) || "Today's topic",
+      subject: formData ? String(formData.get("subject") || state.user.subject || "").trim() : (state.user.subject || "General"),
+      notes: formData ? String(formData.get("notes") || "").trim() : "",
+      studentId: formData ? String(formData.get("studentId") || "").trim() : state.insightStudentId || "",
+      questionCount: 5
+    };
+
+    if (!forcedTask && !payload.topic) {
+      renderApp({ type: "error", text: "Add a topic for the AI coach." });
+      return;
+    }
+
+    if (task === "student-insight" && !payload.studentId) {
+      renderApp({ type: "error", text: "Choose a student for learning insight." });
+      return;
+    }
+
+    state.aiBusy = true;
+    renderApp({ type: "success", text: "AI coach is working..." });
+    try {
+      const response = await api("/api/ai/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      state.aiDraft = response.result || null;
+      state.aiStatus = response.aiStatus || state.aiStatus;
+      if (payload.studentId) {
+        state.insightStudentId = payload.studentId;
+      }
+      state.aiBusy = false;
+      if (forcedTask === "homework") {
+        state.dashboardTab = "homework";
+      } else {
+        state.dashboardTab = "coach";
+      }
+      renderApp({ type: "success", text: response.message || "AI draft ready." });
+    } catch (error) {
+      state.aiBusy = false;
+      renderApp({ type: "error", text: error.message });
+    }
+  }
+
+  function formatAiQuestionsText(draft) {
+    if (!draft) {
+      return "";
+    }
+    if (Array.isArray(draft.questions)) {
+      return draft.questions.map((question, index) => `${index + 1}. ${question.prompt || question}`).join("\n");
+    }
+    if (Array.isArray(draft.miniQuiz)) {
+      return draft.miniQuiz.map((question, index) => `${index + 1}. ${question.prompt || question}`).join("\n");
+    }
+    if (Array.isArray(draft.steps)) {
+      return draft.steps.map((step, index) => `${index + 1}. ${step}`).join("\n");
+    }
+    return "";
+  }
+
+  function formatAiRevisionText(draft) {
+    if (!draft) {
+      return "";
+    }
+    if (Array.isArray(draft.keyPoints)) {
+      return draft.keyPoints.join("\n");
+    }
+    if (draft.teacherTips) {
+      return String(draft.teacherTips);
+    }
+    if (draft.messageForKid) {
+      return String(draft.messageForKid);
+    }
+    return "";
+  }
+
   async function refreshDashboard(message) {
     const payload = await api("/api/dashboard");
     applyDashboardPayload(payload);
@@ -1476,12 +3106,14 @@
       const payload = await api("/api/dashboard");
       const classesChanged = JSON.stringify(state.classes) !== JSON.stringify(payload.classes || []);
       const submissionsChanged = JSON.stringify(state.submissions) !== JSON.stringify(payload.submissions || []);
+      const assignmentsChanged = JSON.stringify(state.assignments) !== JSON.stringify(payload.assignments || []);
+      const assignmentSubsChanged = JSON.stringify(state.assignmentSubmissions) !== JSON.stringify(payload.assignmentSubmissions || []);
       const studentsChanged = JSON.stringify(state.students) !== JSON.stringify(payload.students || []);
       const managedUsersChanged = JSON.stringify(state.managedUsers) !== JSON.stringify(payload.managedUsers || []);
 
       applyDashboardPayload(payload);
 
-      if (classesChanged || submissionsChanged || studentsChanged || managedUsersChanged) {
+      if (classesChanged || submissionsChanged || assignmentsChanged || assignmentSubsChanged || studentsChanged || managedUsersChanged) {
         renderApp();
       }
     } catch (error) {
@@ -1518,11 +3150,14 @@
     state.user = payload.user;
     state.classes = payload.classes || [];
     state.submissions = payload.submissions || [];
+    state.assignments = payload.assignments || [];
+    state.assignmentSubmissions = payload.assignmentSubmissions || [];
     state.students = payload.students || [];
     state.managedUsers = payload.managedUsers || [];
     state.zoomConfigured = Boolean(payload.zoomConfigured);
     state.googleMeetConfigured = Boolean(payload.googleMeetConfigured);
     state.teamsSupported = payload.teamsSupported !== false;
+    state.aiStatus = payload.aiStatus || state.aiStatus;
 
     if (!state.zoomConfigured) {
       state.zoomMode = "manual";
@@ -1532,7 +3167,8 @@
       state.zoomMode = "auto";
     }
 
-    state.dashboardTab = ["meetings", "homework"].includes(state.dashboardTab) ? state.dashboardTab : "meetings";
+    state.dashboardTab = isDashboardTab(state.dashboardTab) ? state.dashboardTab : "meetings";
+    state.progressPeriod = state.progressPeriod === "month" ? "month" : "all";
     state.authRole = ["student", "teacher", "admin"].includes(state.user.role) ? state.user.role : "teacher";
 
     if (state.user.role === "teacher") {
@@ -1720,27 +3356,11 @@
   }
 
   function getAuthRoleLabel() {
-    if (state.authRole === "student") {
-      return "kid";
-    }
-
-    if (state.authRole === "admin") {
-      return "admin";
-    }
-
-    return "teacher";
+    return "account";
   }
 
   function getAuthEmailPlaceholder() {
-    if (state.authRole === "student") {
-      return "student@example.com";
-    }
-
-    if (state.authRole === "admin") {
-      return "admin@example.com";
-    }
-
-    return "teacher@example.com";
+    return "you@example.com";
   }
 
   function formatAdminRoleLabel(role) {
@@ -1881,6 +3501,85 @@
     return Boolean(classItem.autoMeetingId || classItem.zoomMeetingId);
   }
 
+  function isDashboardTab(tab) {
+    return ["meetings", "homework", "coach", "progress"].includes(tab);
+  }
+
+  function getClassEndTime(classItem) {
+    const startTime = new Date(classItem.dateTime).getTime();
+    if (Number.isNaN(startTime)) {
+      return NaN;
+    }
+
+    const durationMinutes = Number(classItem.durationMinutes || 45);
+    return startTime + (Math.max(durationMinutes, 15) * 60 * 1000);
+  }
+
+  function isConductedClass(classItem) {
+    const endTime = getClassEndTime(classItem);
+    return Number.isFinite(endTime) && endTime < Date.now();
+  }
+
+  function isClassInCurrentMonth(classItem) {
+    const classDate = new Date(classItem.dateTime);
+    if (Number.isNaN(classDate.getTime())) {
+      return false;
+    }
+
+    const now = new Date();
+    return classDate.getFullYear() === now.getFullYear() && classDate.getMonth() === now.getMonth();
+  }
+
+  function getProgressPeriodClasses(classes) {
+    const list = Array.isArray(classes) ? classes : [];
+    if (state.progressPeriod === "month") {
+      return list.filter(isClassInCurrentMonth);
+    }
+    return list;
+  }
+
+  function getProgressScopedClasses(classes) {
+    return getFilteredCalendarClasses(getProgressPeriodClasses(classes));
+  }
+
+  function getClassProgress(classes) {
+    const list = Array.isArray(classes) ? classes.filter((classItem) => Number.isFinite(new Date(classItem.dateTime).getTime())) : [];
+    const conducted = list.filter(isConductedClass);
+    const upcoming = list.filter((classItem) => !isConductedClass(classItem));
+    const scheduled = list.length;
+    const percent = scheduled ? Math.round((conducted.length / scheduled) * 100) : 0;
+    return { scheduled, conducted, upcoming, percent };
+  }
+
+  function getUniqueTopics(classes) {
+    const seen = new Set();
+    const topics = [];
+    (classes || []).forEach((classItem) => {
+      const label = getClassTitle(classItem);
+      const key = label.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        topics.push({ label, classItem });
+      }
+    });
+    return topics;
+  }
+
+  function getKidProgressRows(classes) {
+    return (state.students || []).map((student) => {
+      const kidClasses = (classes || []).filter((classItem) =>
+        Array.isArray(classItem.studentIds) && classItem.studentIds.includes(student.id)
+      );
+      const stats = getClassProgress(kidClasses);
+      const lastDone = [...stats.conducted].sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime))[0] || null;
+      return {
+        student,
+        stats,
+        lastTopic: lastDone ? getClassTitle(lastDone) : "—"
+      };
+    });
+  }
+
   function isCurrentOrUpcomingClass(classItem) {
     const startTime = new Date(classItem.dateTime).getTime();
     if (Number.isNaN(startTime)) {
@@ -2001,6 +3700,23 @@
     return parseDateKey(state.calendarCursor);
   }
 
+  // The server stores absolute instants, but the teacher types a wall clock.
+  // Sending the browser zone keeps 4pm meaning 4pm wherever the app is hosted.
+  function getBrowserTimeZone() {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function focusCalendarOn(dateTime) {
+    const target = new Date(dateTime);
+    if (!Number.isNaN(target.getTime())) {
+      state.calendarCursor = createDateKey(target);
+    }
+  }
+
   function parseDateKey(value) {
     const [year, month, day] = String(value || "").split("-").map(Number);
     return new Date(year, (month || 1) - 1, day || 1, 12);
@@ -2046,6 +3762,26 @@
 
   function getCalendarStudentOptions() {
     return state.students || [];
+  }
+
+  // Only active kids can be attached to a class or an activity — the API rejects
+  // the rest, so they must never appear as a pickable option.
+  function getSchedulableStudents() {
+    return (state.students || []).filter((student) => student.isActive);
+  }
+
+  function getPendingStudents() {
+    return (state.students || []).filter((student) => !student.isActive);
+  }
+
+  function renderPendingKidsHint() {
+    const pending = getPendingStudents();
+    if (!pending.length) {
+      return "";
+    }
+
+    const names = pending.map((student) => student.name).join(", ");
+    return `<div class="field-hint">Waiting for admin activation: ${escapeHtml(names)}. Activate them before scheduling.</div>`;
   }
 
   function getSelectedCalendarStudent() {
