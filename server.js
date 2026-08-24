@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { Pool } = require("pg");
+const { runEducationalAi, getAiStatus } = require("./ai-helper");
 
 loadEnvFile(path.join(__dirname, ".env"));
 
@@ -15,8 +16,12 @@ const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || "";
 const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
 const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "").trim();
 const ADMIN_NAME = String(process.env.ADMIN_NAME || "").trim() || "Bowser Admin";
+const ADMIN_PHONE = normalizePhoneNumber(process.env.ADMIN_PHONE || "");
 const STORAGE_MODE = DATABASE_URL ? "postgres" : (IS_VERCEL ? "runtime-file" : "file");
-const RUNTIME_ROOT = STORAGE_MODE === "file" ? __dirname : path.join("/tmp", "bowser-runtime");
+// BOWSER_DATA_ROOT isolates tests/dev sandboxes from the real portal data file.
+const RUNTIME_ROOT = process.env.BOWSER_DATA_ROOT
+  ? path.resolve(process.env.BOWSER_DATA_ROOT)
+  : (STORAGE_MODE === "file" ? __dirname : path.join("/tmp", "bowser-runtime"));
 const DATA_DIR = path.join(RUNTIME_ROOT, "data");
 const DATA_FILE = path.join(DATA_DIR, "portal-data.json");
 const REPO_DATA_FILE = path.join(__dirname, "data", "portal-data.json");
@@ -28,6 +33,10 @@ const MAX_TEXT_LENGTH = 2000;
 const MAX_TOPIC_LENGTH = 200;
 const LOGIN_RATE_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_RATE_MAX_ATTEMPTS = 12;
+const TWO_FA_TTL_MS = 10 * 60 * 1000;
+const TWO_FA_MAX_ATTEMPTS = 5;
+const EXPOSE_LOGIN_OTP = process.env.EXPOSE_LOGIN_OTP === "true"
+  || (!IS_PRODUCTION && process.env.EXPOSE_LOGIN_OTP !== "false");
 const loginAttemptTracker = new Map();
 const pool = STORAGE_MODE === "postgres"
   ? new Pool({
@@ -211,21 +220,15 @@ app.post("/api/login", handleAsync(async (req, res) => {
     return;
   }
 
-  const { email, password, role } = req.body || {};
-  const normalizedRole = String(role || "").trim().toLowerCase();
+  const { email, password } = req.body || {};
   const normalizedEmail = String(email || "").trim().toLowerCase().slice(0, 254);
   const normalizedPassword = String(password || "");
   try {
     const database = await readDatabase();
-    const candidates = database.users.filter((entry) => {
-      if (String(entry.email || "").toLowerCase() !== normalizedEmail) {
-        return false;
-      }
-
-      return ["teacher", "student", "admin"].includes(normalizedRole)
-        ? entry.role === normalizedRole
-        : true;
-    });
+    // Role is inferred from the matching account — clients do not choose it at login.
+    const candidates = database.users.filter(
+      (entry) => String(entry.email || "").toLowerCase() === normalizedEmail
+    );
 
     // Always perform a password check to reduce timing differences between
     // missing accounts and wrong passwords.
@@ -260,17 +263,183 @@ app.post("/api/login", handleAsync(async (req, res) => {
       databaseChanged = true;
     }
 
+    const otpCode = String(crypto.randomInt(100000, 1000000));
+    const challengeId = crypto.randomUUID();
+    user.twoFactorChallenge = {
+      id: challengeId,
+      codeHash: hashPassword(otpCode),
+      expiresAt: Date.now() + TWO_FA_TTL_MS,
+      attempts: 0
+    };
+    databaseChanged = true;
+
     if (databaseChanged) {
       await writeDatabase(database);
     }
 
+    const delivery = await deliverLoginOtp({
+      email: user.email,
+      phone: user.phone || "",
+      name: user.name,
+      code: otpCode
+    });
+
+    console.log(
+      `[2FA] Login code for ${user.email}${user.phone ? ` / ${user.phone}` : ""}: ${otpCode} (delivery=${delivery.channel || "local"})`
+    );
+
+    // When SMS/email cannot be delivered, show the code on screen so login still works.
+    const shouldExposeCode = !delivery.sent || EXPOSE_LOGIN_OTP;
+
+    res.json({
+      requires2fa: true,
+      challengeId,
+      message: buildTwoFactorMessage(delivery),
+      delivery: delivery.channel || "local",
+      maskedPhone: maskPhoneNumber(user.phone || ""),
+      ...(shouldExposeCode ? { devCode: otpCode } : {})
+    });
+  } catch (error) {
+    console.error("login 2FA error:", error);
+    res.status(500).json({ error: "Could not complete login." });
+  }
+}));
+
+app.post("/api/login/resend-2fa", handleAsync(async (req, res) => {
+  const clientKey = getClientRateKey(req);
+  if (isRateLimited(clientKey)) {
+    res.status(429).json({ error: "Too many attempts. Please wait a few minutes and try again." });
+    return;
+  }
+
+  const challengeId = String((req.body || {}).challengeId || "").trim();
+  if (!challengeId) {
+    res.status(400).json({ error: "Missing verification challenge. Please sign in again." });
+    return;
+  }
+
+  try {
+    const database = await readDatabase();
+    const user = database.users.find(
+      (entry) => entry.twoFactorChallenge && entry.twoFactorChallenge.id === challengeId
+    );
+
+    if (!user || !user.twoFactorChallenge) {
+      res.status(401).json({ error: "Verification expired. Please sign in again." });
+      return;
+    }
+
+    const otpCode = String(crypto.randomInt(100000, 1000000));
+    const nextChallengeId = crypto.randomUUID();
+    user.twoFactorChallenge = {
+      id: nextChallengeId,
+      codeHash: hashPassword(otpCode),
+      expiresAt: Date.now() + TWO_FA_TTL_MS,
+      attempts: 0
+    };
+    await writeDatabase(database);
+
+    const delivery = await deliverLoginOtp({
+      email: user.email,
+      phone: user.phone || "",
+      name: user.name,
+      code: otpCode
+    });
+
+    console.log(
+      `[2FA] Resent login code for ${user.email}${user.phone ? ` / ${user.phone}` : ""}: ${otpCode} (delivery=${delivery.channel || "local"})`
+    );
+
+    const shouldExposeCode = !delivery.sent || EXPOSE_LOGIN_OTP;
+    res.json({
+      requires2fa: true,
+      challengeId: nextChallengeId,
+      message: buildTwoFactorMessage(delivery, { resend: true }),
+      delivery: delivery.channel || "local",
+      maskedPhone: maskPhoneNumber(user.phone || ""),
+      ...(shouldExposeCode ? { devCode: otpCode } : {})
+    });
+  } catch (error) {
+    console.error("resend 2FA error:", error);
+    res.status(500).json({ error: "Could not resend the code." });
+  }
+}));
+
+app.post("/api/login/verify-2fa", handleAsync(async (req, res) => {
+  const clientKey = getClientRateKey(req);
+  if (isRateLimited(clientKey)) {
+    res.status(429).json({ error: "Too many attempts. Please wait a few minutes and try again." });
+    return;
+  }
+
+  const challengeId = String((req.body || {}).challengeId || "").trim();
+  const code = String((req.body || {}).code || "").trim().replace(/\s+/g, "");
+
+  if (!challengeId || !/^\d{6}$/.test(code)) {
+    res.status(400).json({ error: "Enter the 6-digit verification code." });
+    return;
+  }
+
+  try {
+    const database = await readDatabase();
+    const user = database.users.find(
+      (entry) => entry.twoFactorChallenge && entry.twoFactorChallenge.id === challengeId
+    );
+
+    if (!user || !user.twoFactorChallenge) {
+      registerFailedLogin(clientKey);
+      res.status(401).json({ error: "Verification expired. Please sign in again." });
+      return;
+    }
+
+    const challenge = user.twoFactorChallenge;
+    if (Number(challenge.expiresAt) < Date.now()) {
+      user.twoFactorChallenge = null;
+      await writeDatabase(database);
+      res.status(401).json({ error: "Verification code expired. Please sign in again." });
+      return;
+    }
+
+    if (Number(challenge.attempts || 0) >= TWO_FA_MAX_ATTEMPTS) {
+      user.twoFactorChallenge = null;
+      await writeDatabase(database);
+      registerFailedLogin(clientKey);
+      res.status(429).json({ error: "Too many incorrect codes. Please sign in again." });
+      return;
+    }
+
+    if (!verifyPassword(code, challenge.codeHash)) {
+      challenge.attempts = Number(challenge.attempts || 0) + 1;
+      await writeDatabase(database);
+      registerFailedLogin(clientKey);
+      res.status(401).json({ error: "Incorrect verification code." });
+      return;
+    }
+
+    if (user.role !== "admin" && !isUserActive(user)) {
+      user.twoFactorChallenge = null;
+      await writeDatabase(database);
+      res.status(403).json({
+        error: getActivationStatus(user) === "inactive"
+          ? "Your account is deactivated. Please contact admin."
+          : "Your account is waiting for admin activation."
+      });
+      return;
+    }
+
+    user.twoFactorChallenge = null;
+    ensureSessionSecret(database);
+    await writeDatabase(database);
+    clearFailedLogins(clientKey);
+
     setSessionCookie(res, createSessionToken(user, resolveSessionSecret(database)));
     res.json({
       user: sanitizeUser(user),
-      dashboard: buildDashboard(user, database)
+      dashboard: buildDashboard(user, database),
+      message: "Signed in successfully."
     });
   } catch (error) {
-    res.status(500).json({ error: "Could not complete login." });
+    res.status(500).json({ error: "Could not verify the code." });
   }
 }));
 
@@ -280,12 +449,13 @@ app.post("/api/logout", (_req, res) => {
 });
 
 app.post("/api/register", handleAsync(async (req, res) => {
-  const { role, name, email, password, subject } = req.body || {};
+  const { role, name, email, password, subject, phone } = req.body || {};
   const normalizedRole = String(role || "").trim().toLowerCase();
   const normalizedName = String(name || "").trim();
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const normalizedPassword = String(password || "").trim();
   const normalizedSubject = String(subject || "").trim();
+  const normalizedPhone = normalizePhoneNumber(phone);
 
   if (!["teacher", "student"].includes(normalizedRole)) {
     res.status(400).json({ error: "Choose a teacher or student account type." });
@@ -299,6 +469,11 @@ app.post("/api/register", handleAsync(async (req, res) => {
 
   if (!normalizedEmail || !normalizedEmail.includes("@")) {
     res.status(400).json({ error: "Enter a valid email address." });
+    return;
+  }
+
+  if (!normalizedPhone) {
+    res.status(400).json({ error: "Mobile number is required for SMS login codes." });
     return;
   }
 
@@ -324,11 +499,17 @@ app.post("/api/register", handleAsync(async (req, res) => {
       return;
     }
 
+    if (database.users.some((entry) => normalizePhoneNumber(entry.phone) === normalizedPhone)) {
+      res.status(409).json({ error: "An account with this mobile number already exists." });
+      return;
+    }
+
     const user = {
       id: `${normalizedRole}-${crypto.randomUUID()}`,
       role: normalizedRole,
       name: normalizedName.slice(0, 80),
       email: normalizedEmail.slice(0, 254),
+      phone: normalizedPhone,
       password: hashPassword(normalizedPassword),
       isActive: false,
       activationStatus: "pending",
@@ -381,19 +562,26 @@ app.post("/api/classes", requireAuth("teacher"), handleAsync(async (req, res) =>
 
     let meetingLink = "";
     let autoMeeting = null;
+    let meetingWarning = "";
     const firstSlot = plan.slots[0];
 
     if (normalizedMeetingMode === "auto") {
       // One shared auto meeting link for the whole series keeps bulk
       // scheduling fast and matches a fixed classroom meeting room.
-      autoMeeting = await createAutoMeeting(normalizedMeetingProvider, {
-        teacher,
-        topic,
-        agenda: details,
-        startTime: firstSlot.toISOString(),
-        durationMinutes: plan.durationMinutes
-      });
-      meetingLink = autoMeeting.joinUrl;
+      // A provider outage must not cost the teacher the whole schedule, so the
+      // class is still saved and the link can be added afterwards.
+      try {
+        autoMeeting = await createAutoMeeting(normalizedMeetingProvider, {
+          teacher,
+          topic,
+          agenda: details,
+          startTime: firstSlot.toISOString(),
+          durationMinutes: plan.durationMinutes
+        });
+        meetingLink = autoMeeting.joinUrl;
+      } catch (meetingError) {
+        meetingWarning = `The ${getMeetingProviderLabel(normalizedMeetingProvider)} link could not be created (${meetingError.message}) Open the class and add a link when the provider is back.`;
+      }
     } else if (normalizedMeetingProvider !== "none" && plan.manualMeetingLink) {
       const normalizedLink = normalizeMeetingLink(plan.manualMeetingLink, normalizedMeetingProvider);
       meetingLink = normalizeExternalUrl(normalizedLink, {
@@ -417,7 +605,7 @@ app.post("/api/classes", requireAuth("teacher"), handleAsync(async (req, res) =>
       studentIds: selectedStudents.map((student) => student.id),
       studentNames: selectedStudents.map((student) => student.name),
       meetingProvider: normalizedMeetingProvider,
-      meetingMode: normalizedMeetingMode,
+      meetingMode: meetingWarning ? "manual" : normalizedMeetingMode,
       meetingLink,
       zoomLink: normalizedMeetingProvider === "zoom" ? meetingLink : "",
       driveLink: normalizedDriveLink,
@@ -435,18 +623,21 @@ app.post("/api/classes", requireAuth("teacher"), handleAsync(async (req, res) =>
     const baseMessage = count > 1
       ? `Scheduled ${count} classes.`
       : "Class scheduled successfully.";
-    const linkMessage = autoMeeting
-      ? ` Shared ${getMeetingProviderLabel(normalizedMeetingProvider)} class link created once for the series.`
-      : meetingLink
-        ? ` ${getMeetingProviderLabel(normalizedMeetingProvider)} class link saved and shared with students.`
-        : count === 1
-          ? " You can add a class link later if needed."
-          : " Add a class link later if needed.";
+    const linkMessage = meetingWarning
+      ? ` ${meetingWarning}`
+      : autoMeeting
+        ? ` Shared ${getMeetingProviderLabel(normalizedMeetingProvider)} class link created once for the series.`
+        : meetingLink
+          ? ` ${getMeetingProviderLabel(normalizedMeetingProvider)} class link saved and shared with students.`
+          : count === 1
+            ? " You can add a class link later if needed."
+            : " Add a class link later if needed.";
 
     res.status(201).json({
       classItem,
       classItems,
       count,
+      warning: meetingWarning || undefined,
       message: `${baseMessage}${linkMessage}`
     });
   } catch (error) {
@@ -492,8 +683,8 @@ app.put("/api/classes/:classId", requireAuth("teacher"), handleAsync(async (req,
     return;
   }
 
-  const scheduledDate = new Date(String(dateTime));
-  if (Number.isNaN(scheduledDate.getTime())) {
+  const scheduledDate = parseScheduledDateTime(dateTime, resolveScheduleTimeZone((req.body || {}).timeZone));
+  if (!scheduledDate || Number.isNaN(scheduledDate.getTime())) {
     res.status(400).json({ error: "Please choose a valid class date and time." });
     return;
   }
@@ -520,26 +711,47 @@ app.put("/api/classes/:classId", requireAuth("teacher"), handleAsync(async (req,
     });
     const rawManualMeetingLink = String(manualMeetingLink || manualZoomLink || "").trim();
 
-    let meetingLink = classItem.meetingLink || classItem.zoomLink || "";
-    let autoMeeting = null;
+    const existingLink = classItem.meetingLink || classItem.zoomLink || "";
+    const existingAutoMeetingId = classItem.autoMeetingId || classItem.zoomMeetingId || "";
+    const scheduleUnchanged = classItem.dateTime === scheduledDate.toISOString()
+      && Number(classItem.durationMinutes) === normalizedDuration;
+    // Re-creating the meeting on every save would hand students a new room each
+    // time the teacher fixes a typo, so keep the existing one unless the slot
+    // itself moved or the provider changed.
+    const keepsExistingAutoMeeting = normalizedMeetingMode === "auto"
+      && Boolean(existingLink)
+      && Boolean(existingAutoMeetingId)
+      && classItem.meetingProvider === normalizedMeetingProvider
+      && scheduleUnchanged;
 
-    if (normalizedMeetingMode === "auto") {
-      autoMeeting = await createAutoMeeting(normalizedMeetingProvider, {
-        teacher,
-        topic: String(topic || "").trim() || `Class with ${selectedStudents.map((student) => student.name).join(", ")}`,
-        agenda: String(details || "").trim(),
-        startTime: scheduledDate.toISOString(),
-        durationMinutes: normalizedDuration
-      });
-      meetingLink = autoMeeting.joinUrl;
+    let meetingLink = existingLink;
+    let autoMeeting = null;
+    let meetingWarning = "";
+
+    if (keepsExistingAutoMeeting) {
+      meetingLink = existingLink;
+    } else if (normalizedMeetingMode === "auto") {
+      try {
+        autoMeeting = await createAutoMeeting(normalizedMeetingProvider, {
+          teacher,
+          topic: String(topic || "").trim() || `Class with ${selectedStudents.map((student) => student.name).join(", ")}`,
+          agenda: String(details || "").trim(),
+          startTime: scheduledDate.toISOString(),
+          durationMinutes: normalizedDuration
+        });
+        meetingLink = autoMeeting.joinUrl;
+      } catch (meetingError) {
+        // Keep the class edit — and any link it already had — rather than
+        // failing the whole save because the provider was unreachable.
+        meetingWarning = `The ${getMeetingProviderLabel(normalizedMeetingProvider)} link could not be re-created (${meetingError.message})`;
+        meetingLink = existingLink;
+      }
     } else if (normalizedMeetingProvider !== "none" && rawManualMeetingLink) {
       const normalizedLink = normalizeMeetingLink(rawManualMeetingLink, normalizedMeetingProvider);
       meetingLink = normalizeExternalUrl(normalizedLink, {
         label: `${getMeetingProviderLabel(normalizedMeetingProvider)} class link`,
         allowedHosts: getMeetingHosts(normalizedMeetingProvider)
       });
-    } else if (normalizedMeetingProvider === "none") {
-      meetingLink = "";
     } else {
       meetingLink = "";
     }
@@ -551,20 +763,35 @@ app.put("/api/classes/:classId", requireAuth("teacher"), handleAsync(async (req,
     classItem.studentIds = selectedStudents.map((student) => student.id);
     classItem.studentNames = selectedStudents.map((student) => student.name);
     classItem.driveLink = normalizedDriveLink;
+    const retainedAutoMeetingId = keepsExistingAutoMeeting || (meetingWarning && meetingLink === existingLink)
+      ? existingAutoMeetingId
+      : "";
+
     classItem.meetingProvider = normalizedMeetingProvider;
-    classItem.meetingMode = normalizedMeetingMode;
+    classItem.meetingMode = normalizedMeetingMode === "auto" && !autoMeeting && !keepsExistingAutoMeeting
+      ? "manual"
+      : normalizedMeetingMode;
     classItem.meetingLink = meetingLink;
     classItem.zoomLink = normalizedMeetingProvider === "zoom" ? meetingLink : "";
-    classItem.autoMeetingId = autoMeeting ? autoMeeting.meetingId : "";
-    classItem.zoomMeetingId = autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.meetingId : "";
-    classItem.zoomStartUrl = autoMeeting && normalizedMeetingProvider === "zoom" ? autoMeeting.startUrl : "";
+    classItem.autoMeetingId = autoMeeting ? autoMeeting.meetingId : retainedAutoMeetingId;
+    classItem.zoomMeetingId = normalizedMeetingProvider === "zoom"
+      ? (autoMeeting ? autoMeeting.meetingId : retainedAutoMeetingId)
+      : "";
+    classItem.zoomStartUrl = normalizedMeetingProvider === "zoom"
+      ? (autoMeeting ? autoMeeting.startUrl : (retainedAutoMeetingId ? (classItem.zoomStartUrl || "") : ""))
+      : "";
 
     await writeDatabase(database);
     res.json({
       classItem,
-      message: autoMeeting
-        ? `Class updated and new ${getMeetingProviderLabel(normalizedMeetingProvider)} class link created.`
-        : "Class updated successfully."
+      warning: meetingWarning || undefined,
+      message: meetingWarning
+        ? `Class updated. ${meetingWarning}`
+        : autoMeeting
+          ? `Class updated and a new ${getMeetingProviderLabel(normalizedMeetingProvider)} class link was created.`
+          : keepsExistingAutoMeeting
+            ? "Class updated. The existing class link was kept."
+            : "Class updated successfully."
     });
   } catch (error) {
     const status = NOT_CONFIGURED_ERROR_CODES.has(error.code)
@@ -572,6 +799,45 @@ app.put("/api/classes/:classId", requireAuth("teacher"), handleAsync(async (req,
       : (error.statusCode || 502);
     res.status(status).json({ error: error.message });
   }
+}));
+
+app.delete("/api/classes/:classId", requireAuth("teacher"), handleAsync(async (req, res) => {
+  const { classId } = req.params;
+  const scope = String(req.query.scope || "single").trim().toLowerCase();
+  const database = req.database;
+  const teacher = req.currentUser;
+  const classItem = database.classes.find((entry) => entry.id === classId);
+
+  if (!classItem) {
+    res.status(404).json({ error: "Class not found." });
+    return;
+  }
+
+  if (classItem.teacherId !== teacher.id) {
+    res.status(403).json({ error: "You can only cancel your own classes." });
+    return;
+  }
+
+  const targets = scope === "series" && classItem.seriesId
+    ? database.classes.filter((entry) => entry.seriesId === classItem.seriesId && entry.teacherId === teacher.id)
+    : [classItem];
+  const targetIds = new Set(targets.map((entry) => entry.id));
+
+  const submissions = Array.isArray(database.submissions) ? database.submissions : [];
+  const removedSubmissions = submissions.filter((entry) => targetIds.has(entry.classId)).length;
+
+  database.classes = database.classes.filter((entry) => !targetIds.has(entry.id));
+  database.submissions = submissions.filter((entry) => !targetIds.has(entry.classId));
+  await writeDatabase(database);
+
+  const removed = targets.length;
+  res.json({
+    removed,
+    removedSubmissions,
+    message: removed === 1
+      ? "Class cancelled and removed from the kid's schedule."
+      : `Cancelled ${removed} classes from this series.`
+  });
 }));
 
 app.post("/api/submissions", requireAuth("student"), handleHomeworkUpload, handleAsync(async (req, res) => {
@@ -737,6 +1003,252 @@ app.put("/api/submissions/:submissionId/grade", requireAuth("teacher"), handleAs
   res.json({ message: "Homework ranking saved." });
 }));
 
+app.post("/api/assignments", requireAuth("teacher"), handleAsync(async (req, res) => {
+  const database = req.database;
+  const teacher = req.currentUser;
+  const body = req.body || {};
+  const title = clampText(body.title, 160);
+  const instructions = clampText(body.instructions, MAX_TEXT_LENGTH);
+  const activityType = ["practice", "quiz", "project", "revision"].includes(String(body.activityType || "").toLowerCase())
+    ? String(body.activityType).toLowerCase()
+    : "practice";
+  const dueAtRaw = String(body.dueAt || "").trim();
+  const revisionNotes = clampText(body.revisionNotes, MAX_TEXT_LENGTH);
+  const taughtSummary = clampText(body.taughtSummary, MAX_TEXT_LENGTH);
+
+  if (!title) {
+    res.status(400).json({ error: "Give the homework activity a title." });
+    return;
+  }
+
+  if (!instructions && !Array.isArray(body.questions)) {
+    res.status(400).json({ error: "Add instructions or questions for the activity." });
+    return;
+  }
+
+  try {
+    const selectedStudents = resolveSelectedStudents(database, body.studentIds);
+    const questions = normalizeAssignmentQuestions(body.questions);
+    const dueAt = dueAtRaw ? new Date(dueAtRaw) : null;
+    if (dueAtRaw && Number.isNaN(dueAt.getTime())) {
+      res.status(400).json({ error: "Due date is invalid." });
+      return;
+    }
+
+    const assignment = {
+      id: `assign-${crypto.randomUUID()}`,
+      teacherId: teacher.id,
+      teacherName: teacher.name,
+      subject: teacher.subject || "General",
+      title,
+      instructions: instructions || "Complete the activity and submit your answers.",
+      activityType,
+      questions,
+      revisionNotes,
+      taughtSummary,
+      studentIds: selectedStudents.map((student) => student.id),
+      studentNames: selectedStudents.map((student) => student.name),
+      dueAt: dueAt ? dueAt.toISOString() : "",
+      source: body.source === "ai" ? "ai" : "manual",
+      createdAt: new Date().toISOString()
+    };
+
+    database.assignments = Array.isArray(database.assignments) ? database.assignments : [];
+    database.assignments.push(assignment);
+    await writeDatabase(database);
+
+    res.status(201).json({
+      assignment,
+      message: `Homework activity shared with ${selectedStudents.length} student${selectedStudents.length === 1 ? "" : "s"}.`
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message || "Could not create assignment." });
+  }
+}));
+
+app.post("/api/assignments/:assignmentId/submit", requireAuth("student"), (req, res, next) => {
+  const contentType = String(req.headers["content-type"] || "");
+  if (contentType.includes("multipart/form-data")) {
+    handleHomeworkUpload(req, res, next);
+    return;
+  }
+  next();
+}, handleAsync(async (req, res) => {
+  const { assignmentId } = req.params;
+  const database = req.database;
+  const student = req.currentUser;
+  const body = req.body || {};
+  const textResponse = clampText(body.textResponse, MAX_TEXT_LENGTH);
+  let answers = [];
+  try {
+    answers = typeof body.answers === "string" ? JSON.parse(body.answers || "[]") : (body.answers || []);
+  } catch (_error) {
+    answers = [];
+  }
+  if (!Array.isArray(answers)) {
+    answers = [];
+  }
+
+  database.assignments = Array.isArray(database.assignments) ? database.assignments : [];
+  database.assignmentSubmissions = Array.isArray(database.assignmentSubmissions) ? database.assignmentSubmissions : [];
+
+  const assignment = database.assignments.find((entry) => entry.id === assignmentId);
+  if (!assignment) {
+    cleanupFile(req.file && req.file.path);
+    res.status(404).json({ error: "Activity not found." });
+    return;
+  }
+
+  if (!Array.isArray(assignment.studentIds) || !assignment.studentIds.includes(student.id)) {
+    cleanupFile(req.file && req.file.path);
+    res.status(403).json({ error: "This activity is not assigned to you." });
+    return;
+  }
+
+  const normalizedAnswers = answers
+    .map((entry) => ({
+      questionId: String((entry && entry.questionId) || "").trim(),
+      text: clampText(entry && entry.text, 1000)
+    }))
+    .filter((entry) => entry.questionId || entry.text);
+
+  if (!textResponse && !normalizedAnswers.length && !req.file) {
+    res.status(400).json({ error: "Write an answer, solve the questions, or upload a photo." });
+    return;
+  }
+
+  const existing = database.assignmentSubmissions.find(
+    (entry) => entry.assignmentId === assignmentId && entry.studentId === student.id
+  );
+
+  let imageUrl = existing ? existing.imageUrl || "" : "";
+  let filePath = existing ? existing.filePath || "" : "";
+  if (req.file) {
+    if (existing && existing.filePath) {
+      cleanupFile(existing.filePath);
+    }
+    const stored = buildStoredHomeworkAsset(req.file);
+    imageUrl = stored.imageUrl;
+    filePath = stored.filePath;
+  }
+
+  const payload = {
+    id: existing ? existing.id : `asub-${crypto.randomUUID()}`,
+    assignmentId,
+    studentId: student.id,
+    studentName: student.name,
+    subject: assignment.subject,
+    textResponse,
+    answers: normalizedAnswers,
+    imageUrl,
+    filePath,
+    submittedAt: new Date().toISOString(),
+    score: existing ? existing.score || "" : "",
+    feedback: existing ? existing.feedback || "" : ""
+  };
+
+  if (existing) {
+    Object.assign(existing, payload);
+  } else {
+    database.assignmentSubmissions.push(payload);
+  }
+
+  await writeDatabase(database);
+  res.status(201).json({ message: "Activity submitted. Great work!", submission: payload });
+}));
+
+app.put("/api/assignment-submissions/:submissionId/grade", requireAuth("teacher"), handleAsync(async (req, res) => {
+  const { submissionId } = req.params;
+  const { score, feedback } = req.body || {};
+  const database = req.database;
+  const teacher = req.currentUser;
+  database.assignmentSubmissions = Array.isArray(database.assignmentSubmissions) ? database.assignmentSubmissions : [];
+  database.assignments = Array.isArray(database.assignments) ? database.assignments : [];
+
+  const submission = database.assignmentSubmissions.find((entry) => entry.id === submissionId);
+  if (!submission) {
+    res.status(404).json({ error: "Submission not found." });
+    return;
+  }
+
+  const assignment = database.assignments.find((entry) => entry.id === submission.assignmentId);
+  if (!assignment || assignment.teacherId !== teacher.id) {
+    res.status(403).json({ error: "You can only review your own activities." });
+    return;
+  }
+
+  submission.score = String(score || "").trim();
+  submission.feedback = String(feedback || "").trim();
+  await writeDatabase(database);
+  res.json({ message: "Feedback saved.", submission });
+}));
+
+app.post("/api/ai/generate", requireAuth("teacher"), handleAsync(async (req, res) => {
+  const body = req.body || {};
+  const task = String(body.task || "").trim().toLowerCase();
+  const allowed = new Set(["homework", "activity", "lesson-plan", "revision-notes", "student-insight"]);
+  if (!allowed.has(task)) {
+    res.status(400).json({ error: "Unknown AI task." });
+    return;
+  }
+
+  const database = req.database;
+  const teacher = req.currentUser;
+  const payload = {
+    subject: body.subject || teacher.subject || "General",
+    topic: body.topic || "",
+    notes: body.notes || "",
+    taughtSummary: body.taughtSummary || body.notes || "",
+    level: body.level || "ages 7-12",
+    questionCount: body.questionCount || 5,
+    studentName: body.studentName || "",
+    history: [],
+    recentAnswers: []
+  };
+
+  if (task === "student-insight") {
+    const studentId = String(body.studentId || "").trim();
+    const student = database.users.find((entry) => entry.id === studentId && entry.role === "student");
+    if (!student) {
+      res.status(400).json({ error: "Choose a student for insight." });
+      return;
+    }
+    payload.studentName = student.name;
+    const teacherClasses = database.classes.filter((entry) => entry.teacherId === teacher.id);
+    const classIds = new Set(teacherClasses.map((entry) => entry.id));
+    const photoHistory = (database.submissions || [])
+      .filter((entry) => entry.studentId === studentId && classIds.has(entry.classId))
+      .map((entry) => ({ score: entry.score || "", feedback: entry.feedback || "", at: entry.submittedAt }));
+    const assignHistory = (database.assignmentSubmissions || [])
+      .filter((entry) => entry.studentId === studentId)
+      .filter((entry) => {
+        const assignment = (database.assignments || []).find((item) => item.id === entry.assignmentId);
+        return assignment && assignment.teacherId === teacher.id;
+      })
+      .map((entry) => ({
+        score: entry.score || "",
+        feedback: entry.feedback || "",
+        at: entry.submittedAt,
+        text: entry.textResponse || "",
+        answers: entry.answers || []
+      }));
+    payload.history = [...photoHistory, ...assignHistory].slice(0, 20);
+    payload.recentAnswers = assignHistory.slice(0, 5).flatMap((entry) => entry.answers || []).slice(0, 12);
+  }
+
+  const ai = await runEducationalAi({ task, payload });
+  res.json({
+    task,
+    provider: ai.provider,
+    model: ai.model,
+    result: ai.result,
+    aiStatus: getAiStatus(),
+    message: ai.provider === "offline"
+      ? "Generated with built-in education templates (plug AI_API_KEY later for smarter AI)."
+      : `Generated with ${ai.provider}.`
+  });
+}));
+
 app.put("/api/admin/users/:userId/activation", requireAuth("admin"), handleAsync(async (req, res) => {
   const { userId } = req.params;
   const { isActive } = req.body || {};
@@ -825,18 +1337,41 @@ function buildDashboard(user, database) {
       .map(sanitizeUser)
     : [];
 
+  const assignmentsAll = Array.isArray(database.assignments) ? database.assignments : [];
+  const assignmentSubsAll = Array.isArray(database.assignmentSubmissions) ? database.assignmentSubmissions : [];
+
+  const assignments = user.role === "teacher"
+    ? assignmentsAll.filter((entry) => entry.teacherId === user.id)
+    : user.role === "student"
+      ? assignmentsAll.filter((entry) => Array.isArray(entry.studentIds) && entry.studentIds.includes(user.id))
+      : [];
+
+  const assignmentSubmissions = user.role === "teacher"
+    ? assignmentSubsAll.filter((entry) => {
+        const assignment = assignmentsAll.find((item) => item.id === entry.assignmentId);
+        return assignment && assignment.teacherId === user.id;
+      })
+    : user.role === "student"
+      ? assignmentSubsAll.filter((entry) => entry.studentId === user.id)
+      : [];
+
   classes.sort((left, right) => new Date(left.dateTime) - new Date(right.dateTime));
   submissions.sort((left, right) => new Date(right.submittedAt) - new Date(left.submittedAt));
+  assignments.sort((left, right) => new Date(right.createdAt || 0) - new Date(left.createdAt || 0));
+  assignmentSubmissions.sort((left, right) => new Date(right.submittedAt || 0) - new Date(left.submittedAt || 0));
 
   return {
     user: sanitizeUser(user),
     students: (user.role === "teacher" ? students : students.filter((entry) => entry.id === user.id)).map(sanitizeUser),
     classes,
     submissions,
+    assignments,
+    assignmentSubmissions,
     managedUsers,
     zoomConfigured: isZoomConfigured(),
     googleMeetConfigured: isGoogleMeetConfigured(),
-    teamsSupported: true
+    teamsSupported: true,
+    aiStatus: getAiStatus()
   };
 }
 
@@ -847,6 +1382,8 @@ function sanitizeUser(user) {
     subject: user.subject || "",
     name: user.name,
     email: user.email,
+    phone: user.phone || "",
+    maskedPhone: maskPhoneNumber(user.phone || ""),
     isActive: isUserActive(user),
     activationStatus: getActivationStatus(user),
     createdAt: user.createdAt || ""
@@ -1078,6 +1615,12 @@ function normalizeDatabase(database) {
   database.users = Array.isArray(database.users) ? database.users : [];
   database.classes = Array.isArray(database.classes) ? database.classes : [];
   database.submissions = Array.isArray(database.submissions) ? database.submissions : [];
+  if (!Array.isArray(database.assignments)) {
+    database.assignments = [];
+  }
+  if (!Array.isArray(database.assignmentSubmissions)) {
+    database.assignmentSubmissions = [];
+  }
   let changed = false;
   if (ensureSessionSecret(database)) {
     changed = true;
@@ -1215,10 +1758,33 @@ function createSeedData() {
   const database = {
     users: bootstrapAdmin ? [bootstrapAdmin] : [],
     classes: [],
-    submissions: []
+    submissions: [],
+    assignments: [],
+    assignmentSubmissions: []
   };
   ensureSessionSecret(database);
   return database;
+}
+
+function normalizeAssignmentQuestions(rawQuestions) {
+  if (!Array.isArray(rawQuestions)) {
+    return [];
+  }
+
+  return rawQuestions
+    .map((entry, index) => {
+      const prompt = clampText(entry && (entry.prompt || entry.question || entry.text), 500);
+      if (!prompt) {
+        return null;
+      }
+      return {
+        id: String((entry && entry.id) || `q-${index + 1}`),
+        prompt,
+        hint: clampText(entry && entry.hint, 240)
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 12);
 }
 
 function ensureDirectory(directoryPath) {
@@ -1521,6 +2087,7 @@ function createBootstrapAdmin() {
     role: "admin",
     name: ADMIN_NAME,
     email: ADMIN_EMAIL,
+    phone: ADMIN_PHONE,
     password: hashPassword(ADMIN_PASSWORD),
     subject: "",
     isActive: true,
@@ -1549,6 +2116,10 @@ function ensureBootstrapAdmin(database) {
     }
     if (existingAdmin.name !== bootstrapAdmin.name) {
       existingAdmin.name = bootstrapAdmin.name;
+      changed = true;
+    }
+    if (ADMIN_PHONE && existingAdmin.phone !== ADMIN_PHONE) {
+      existingAdmin.phone = ADMIN_PHONE;
       changed = true;
     }
     if (!existingAdmin.createdAt) {
@@ -1673,6 +2244,7 @@ function clampText(value, maxLength) {
 
 function buildClassSchedulePlan(body) {
   const scheduleMode = String(body.scheduleMode || "once").trim().toLowerCase();
+  const timeZone = resolveScheduleTimeZone(body.timeZone);
   const durationMinutes = Number(body.durationMinutes || 45);
   if (!Number.isInteger(durationMinutes) || durationMinutes < 15 || durationMinutes > 180) {
     throw createValidationError("Class duration must be between 15 and 180 minutes.");
@@ -1688,7 +2260,7 @@ function buildClassSchedulePlan(body) {
   const manualMeetingLink = String(body.manualMeetingLink || body.manualZoomLink || "").trim();
 
   if (scheduleMode === "series" || scheduleMode === "recurring" || scheduleMode === "month") {
-    const slots = expandSeriesSlots(body);
+    const slots = expandSeriesSlots(body, timeZone);
     if (!slots.length) {
       throw createValidationError("No class dates match that schedule pattern. Adjust the range or days.");
     }
@@ -1699,6 +2271,7 @@ function buildClassSchedulePlan(body) {
 
     return {
       slots,
+      timeZone,
       durationMinutes,
       topic,
       details,
@@ -1715,13 +2288,14 @@ function buildClassSchedulePlan(body) {
     throw createValidationError("Class date and time are required.");
   }
 
-  const scheduledDate = new Date(String(body.dateTime));
-  if (Number.isNaN(scheduledDate.getTime())) {
+  const scheduledDate = parseScheduledDateTime(body.dateTime, timeZone);
+  if (!scheduledDate || Number.isNaN(scheduledDate.getTime())) {
     throw createValidationError("Please choose a valid class date and time.");
   }
 
   return {
     slots: [scheduledDate],
+    timeZone,
     durationMinutes,
     topic,
     details,
@@ -1734,7 +2308,7 @@ function buildClassSchedulePlan(body) {
   };
 }
 
-function expandSeriesSlots(body) {
+function expandSeriesSlots(body, timeZone) {
   const startDateRaw = String(body.seriesStartDate || body.startDate || "").trim();
   let endDateRaw = String(body.seriesEndDate || body.endDate || "").trim();
   const pattern = String(body.seriesPattern || body.pattern || "weekdays").trim().toLowerCase();
@@ -1791,16 +2365,13 @@ function expandSeriesSlots(body) {
     if (includeDay) {
       for (const time of times) {
         const [hours, minutes] = time.split(":").map(Number);
-        const slot = new Date(
-          cursor.getFullYear(),
-          cursor.getMonth(),
-          cursor.getDate(),
+        slots.push(wallClockToDate({
+          year: cursor.getFullYear(),
+          month: cursor.getMonth() + 1,
+          day: cursor.getDate(),
           hours,
-          minutes,
-          0,
-          0
-        );
-        slots.push(slot);
+          minutes
+        }, timeZone));
       }
     }
 
@@ -1909,9 +2480,262 @@ function formatLocalDateOnly(date) {
   ].join("-");
 }
 
+// Class times arrive as wall-clock strings ("2026-09-01T16:00") with no zone.
+// Parsing those with `new Date()` uses the *server's* zone, so a portal deployed
+// on Vercel (UTC) would store an Indian teacher's 4pm class as 9:30pm. Resolve
+// them against the browser's zone instead, which the client now sends along.
+function resolveScheduleTimeZone(value) {
+  const candidate = String(value || "").trim();
+  if (!candidate) {
+    return MEETING_TIMEZONE;
+  }
+
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate });
+    return candidate;
+  } catch (_error) {
+    return MEETING_TIMEZONE;
+  }
+}
+
+function getTimeZoneOffsetMs(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+
+  const asUtc = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second)
+  );
+
+  return asUtc - (Math.floor(date.getTime() / 1000) * 1000);
+}
+
+function wallClockToDate({ year, month, day, hours, minutes }, timeZone) {
+  const guess = Date.UTC(year, month - 1, day, hours, minutes, 0, 0);
+  const firstOffset = getTimeZoneOffsetMs(new Date(guess), timeZone);
+  const firstPass = guess - firstOffset;
+  // Around a DST boundary the offset at the guessed instant can differ from the
+  // offset at the real instant, so correct once more.
+  const secondOffset = getTimeZoneOffsetMs(new Date(firstPass), timeZone);
+  return new Date(secondOffset === firstOffset ? firstPass : guess - secondOffset);
+}
+
+function hasExplicitTimeZone(value) {
+  return /(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(value || "").trim());
+}
+
+// Accepts both a plain "YYYY-MM-DDTHH:mm" wall clock (resolved in `timeZone`)
+// and a fully qualified instant with a Z/offset suffix.
+function parseScheduledDateTime(value, timeZone) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  if (hasExplicitTimeZone(raw)) {
+    const absolute = new Date(raw);
+    return Number.isNaN(absolute.getTime()) ? null : absolute;
+  }
+
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!match) {
+    const fallback = new Date(raw);
+    return Number.isNaN(fallback.getTime()) ? null : fallback;
+  }
+
+  return wallClockToDate({
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hours: Number(match[4]),
+    minutes: Number(match[5])
+  }, timeZone);
+}
+
 function getClientRateKey(req) {
   const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
   return forwarded || req.ip || req.socket.remoteAddress || "unknown";
+}
+
+function normalizePhoneNumber(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  // Keep leading +, strip spaces/dashes/parentheses.
+  let digits = raw.replace(/[^\d+]/g, "");
+  if (digits.startsWith("00")) {
+    digits = `+${digits.slice(2)}`;
+  }
+
+  // Local numbers starting with 0 → assume default country code if provided.
+  const defaultCountry = String(process.env.SMS_DEFAULT_COUNTRY_CODE || "+91").trim() || "+91";
+  if (/^0\d{8,12}$/.test(digits)) {
+    digits = `${defaultCountry}${digits.slice(1)}`;
+  } else if (/^\d{10,14}$/.test(digits) && !digits.startsWith("+")) {
+    digits = `${defaultCountry}${digits}`;
+  }
+
+  if (!/^\+[1-9]\d{7,14}$/.test(digits)) {
+    return "";
+  }
+
+  return digits;
+}
+
+function maskPhoneNumber(phone) {
+  const normalized = normalizePhoneNumber(phone);
+  if (!normalized || normalized.length < 6) {
+    return "";
+  }
+
+  return `${normalized.slice(0, 3)}••••${normalized.slice(-3)}`;
+}
+
+function buildTwoFactorMessage(delivery, { resend = false } = {}) {
+  if (delivery && delivery.sent && delivery.channel === "sms") {
+    return resend
+      ? `A new code was texted to ${delivery.maskedPhone || "your phone"}.`
+      : `Enter the 6-digit code texted to ${delivery.maskedPhone || "your phone"}.`;
+  }
+
+  if (delivery && delivery.sent) {
+    return resend
+      ? "A new code was sent."
+      : "Enter the 6-digit verification code that was sent to you.";
+  }
+
+  return resend
+    ? "SMS is not configured. A new code is shown on screen (also in the server terminal)."
+    : "SMS is not configured. Use the code shown on the next screen (also printed in the server terminal).";
+}
+
+async function deliverLoginOtp({ email, phone, name, code }) {
+  const text = `Bowser login code: ${code}. It expires in 10 minutes. Do not share this code.`;
+  const normalizedPhone = normalizePhoneNumber(phone);
+
+  // 1) Twilio SMS (preferred)
+  if (normalizedPhone && isTwilioSmsConfigured()) {
+    const smsResult = await sendTwilioSms({
+      to: normalizedPhone,
+      body: text
+    });
+    if (smsResult.sent) {
+      return {
+        sent: true,
+        channel: "sms",
+        reason: "twilio",
+        maskedPhone: maskPhoneNumber(normalizedPhone)
+      };
+    }
+    console.error("[2FA] Twilio SMS failed:", smsResult.reason);
+  }
+
+  // 2) Generic SMS webhook
+  const smsWebhook = String(process.env.SMS_WEBHOOK_URL || process.env.OTP_WEBHOOK_URL || "").trim();
+  if (normalizedPhone && smsWebhook) {
+    try {
+      const response = await fetchWithTimeout(smsWebhook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channel: "sms",
+          to: normalizedPhone,
+          phone: normalizedPhone,
+          email: email || "",
+          name: name || "",
+          subject: "Bowser login code",
+          text,
+          code
+        })
+      });
+      if (response.ok) {
+        return {
+          sent: true,
+          channel: "sms",
+          reason: "webhook",
+          maskedPhone: maskPhoneNumber(normalizedPhone)
+        };
+      }
+      console.error("[2FA] SMS webhook failed with status", response.status);
+    } catch (error) {
+      console.error("[2FA] SMS webhook error:", error.message || error);
+    }
+  }
+
+  if (!normalizedPhone) {
+    return { sent: false, channel: "local", reason: "phone_missing" };
+  }
+
+  if (!isTwilioSmsConfigured() && !smsWebhook) {
+    return { sent: false, channel: "local", reason: "sms_not_configured" };
+  }
+
+  return { sent: false, channel: "local", reason: "sms_send_failed" };
+}
+
+function isTwilioSmsConfigured() {
+  return Boolean(
+    String(process.env.TWILIO_ACCOUNT_SID || "").trim() &&
+    String(process.env.TWILIO_AUTH_TOKEN || "").trim() &&
+    String(process.env.TWILIO_FROM_NUMBER || "").trim()
+  );
+}
+
+async function sendTwilioSms({ to, body }) {
+  const accountSid = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
+  const authToken = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
+  const from = String(process.env.TWILIO_FROM_NUMBER || "").trim();
+
+  if (!accountSid || !authToken || !from) {
+    return { sent: false, reason: "twilio_not_configured" };
+  }
+
+  try {
+    const credentials = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
+    const params = new URLSearchParams({
+      To: to,
+      From: from,
+      Body: body
+    });
+
+    const response = await fetchWithTimeout(
+      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Messages.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${credentials}`,
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: params.toString()
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { sent: false, reason: `twilio_http_${response.status}:${errorText.slice(0, 200)}` };
+    }
+
+    return { sent: true, reason: "twilio" };
+  } catch (error) {
+    return { sent: false, reason: error.message || "twilio_error" };
+  }
 }
 
 function isRateLimited(key) {
@@ -1989,7 +2813,7 @@ async function createGoogleMeetMeeting({ topic, agenda, startTime, durationMinut
   const start = new Date(startTime);
   const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
 
-  const eventResponse = await fetch(
+  const eventResponse = await fetchWithTimeout(
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?conferenceDataVersion=1`,
     {
       method: "POST",
@@ -2042,7 +2866,7 @@ async function createGoogleMeetMeeting({ topic, agenda, startTime, durationMinut
 }
 
 async function createGoogleAccessToken() {
-  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+  const tokenResponse = await fetchWithTimeout("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded"
@@ -2106,7 +2930,7 @@ async function createZoomMeeting({ teacher, topic, agenda, startTime, durationMi
     `${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`
   ).toString("base64");
 
-  const tokenResponse = await fetch(
+  const tokenResponse = await fetchWithTimeout(
     `https://zoom.us/oauth/token?grant_type=account_credentials&account_id=${encodeURIComponent(process.env.ZOOM_ACCOUNT_ID)}`,
     {
       method: "POST",
@@ -2124,7 +2948,7 @@ async function createZoomMeeting({ teacher, topic, agenda, startTime, durationMi
   }
 
   const tokenPayload = await tokenResponse.json();
-  const meetingResponse = await fetch(
+  const meetingResponse = await fetchWithTimeout(
     `https://api.zoom.us/v2/users/${encodeURIComponent(process.env.ZOOM_USER_ID)}/meetings`,
     {
       method: "POST",
@@ -2162,6 +2986,27 @@ async function createZoomMeeting({ teacher, topic, agenda, startTime, durationMi
     joinUrl: meeting.join_url,
     startUrl: meeting.start_url || ""
   };
+}
+
+// Zoom/Google calls sit in the request path for scheduling. Without a deadline a
+// stalled provider would hang the teacher's save until the platform times it out.
+const EXTERNAL_REQUEST_TIMEOUT_MS = Number(process.env.EXTERNAL_REQUEST_TIMEOUT_MS || 15000);
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EXTERNAL_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      const timeoutError = new Error(`The request timed out after ${Math.round(EXTERNAL_REQUEST_TIMEOUT_MS / 1000)}s.`);
+      timeoutError.statusCode = 504;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function readApiError(response) {

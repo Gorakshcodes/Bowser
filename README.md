@@ -13,9 +13,18 @@ A small full-stack teacher-student portal for scheduling classes, sharing links,
 - Shared meeting link applied across a series (one room for the month)
 - Optional topic, notes, and Google Drive materials
 - Kid-friendly student home: next class hero, big join buttons, simple homework flow
+- **Progress** tab for teachers and kid/parent accounts: scheduled vs conducted counts, completion %, and topics covered
+  - Filter by kid (teachers) and All time / This month
+  - Per-kid table so teachers can see who is on track
+- Homework **activities** teachers can assign (notes, questions, revision)
+- Students submit **text answers** and/or photos under each activity
 - Homework photo upload (camera or gallery) with type/size validation
 - Teacher review, ranking, and feedback for homework
-- Security: scrypt password hashes, signed HTTP-only cookies, login rate limits, security headers
+- **AI Coach** for teachers: lesson plans, homework questions, activities, revision notes, student learning insights
+  - Uses `AI_API_KEY` when set (OpenAI-compatible)
+  - Falls back to free offline education templates (and local Ollama if available)
+- Security: scrypt password hashes, 2-step login (password + SMS 6-digit code via Twilio), signed HTTP-only cookies, login rate limits, security headers
+- Kid portal themes: **Game** (Mech Arena style) and **Play** (simple colorful)
 - Week and month calendars; teachers can filter by kid
 - Local JSON storage for development; Postgres for Vercel/production
 

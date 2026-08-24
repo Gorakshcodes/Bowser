@@ -1,6 +1,7 @@
 /**
- * Smoke tests for Bowser Learning Portal (no external services required).
- * Uses an isolated temporary data directory when possible.
+ * API health tests for Bowser Learning Portal (no external services required).
+ * Uses an isolated temporary data directory (BOWSER_DATA_ROOT) so real portal
+ * data is never modified.
  */
 const assert = require("assert");
 const crypto = require("crypto");
@@ -10,21 +11,19 @@ const os = require("os");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "bowser-smoke-"));
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "bowser-api-test-"));
 const PORT = 34567 + Math.floor(Math.random() * 1000);
 
 process.chdir(ROOT);
 process.env.PORT = String(PORT);
-process.env.ADMIN_EMAIL = "admin@test.local";
+process.env.ADMIN_EMAIL = "admin@example.test";
 process.env.ADMIN_PASSWORD = "TestAdminPass1";
-process.env.ADMIN_NAME = "Smoke Admin";
-process.env.SESSION_SECRET = "smoke-test-session-secret-32chars!!";
+process.env.ADMIN_NAME = "Portal Admin";
+process.env.SESSION_SECRET = "api-test-session-secret-32chars!!!!";
 process.env.DATABASE_URL = "";
 process.env.NODE_ENV = "test";
-
-// Point runtime file storage at temp by using non-vercel file mode under ROOT
-// We run against real local data file carefully — use isolated DATA by
-// patching env and importing after env is set.
+// Never touch the real Desktop/Bowser/data store during automated tests.
+process.env.BOWSER_DATA_ROOT = TMP;
 
 function request(method, urlPath, { body, cookie } = {}) {
   return new Promise((resolve, reject) => {
@@ -101,7 +100,7 @@ function expandSeriesLocal(body) {
 }
 
 async function main() {
-  console.log("Starting smoke tests…");
+  console.log("Starting API tests…");
 
   // Pure logic checks for monthly series expansion
   const weekdaySlots = expandSeriesLocal({
@@ -135,32 +134,45 @@ async function main() {
     assert.ok(health.headers["x-frame-options"] === "DENY", "security header frame deny");
 
     const badLogin = await request("POST", "/api/login", {
-      body: { email: "nobody@test.local", password: "wrong-password", role: "teacher" }
+      body: { email: "nobody@example.test", password: "wrong-password", role: "teacher" }
     });
     assert.strictEqual(badLogin.status, 401);
 
-    const adminLogin = await request("POST", "/api/login", {
-      body: {
-        email: process.env.ADMIN_EMAIL,
-        password: process.env.ADMIN_PASSWORD,
-        role: "admin"
-      }
-    });
-    assert.strictEqual(adminLogin.status, 200, `admin login failed: ${adminLogin.raw}`);
-    assert.ok(adminLogin.cookie.includes("bowser_session"), "session cookie set");
+    async function loginWith2fa(email, password) {
+      const step1 = await request("POST", "/api/login", {
+        body: { email, password }
+      });
+      assert.strictEqual(step1.status, 200, `login step1 failed: ${step1.raw}`);
+      assert.strictEqual(step1.json.requires2fa, true, "expects 2FA challenge");
+      assert.ok(step1.json.challengeId, "challengeId required");
+      assert.ok(step1.json.devCode, "devCode should be exposed in tests");
+      const step2 = await request("POST", "/api/login/verify-2fa", {
+        body: {
+          challengeId: step1.json.challengeId,
+          code: step1.json.devCode
+        }
+      });
+      assert.strictEqual(step2.status, 200, `login step2 failed: ${step2.raw}`);
+      assert.ok(step2.cookie.includes("bowser_session"), "session cookie set after 2FA");
+      return step2;
+    }
+
+    const adminLogin = await loginWith2fa(process.env.ADMIN_EMAIL, process.env.ADMIN_PASSWORD);
     const adminCookie = adminLogin.cookie;
 
     const stamp = crypto.randomBytes(3).toString("hex");
-    const teacherEmail = `teacher-${stamp}@test.local`;
-    const studentEmail = `student-${stamp}@test.local`;
-    const password = "SecurePass1";
+    const phoneStamp = String(Date.now()).slice(-7);
+    const teacherEmail = `teacher.${stamp}@example.test`;
+    const studentEmail = `student.${stamp}@example.test`;
+    const password = "TestPass12";
 
     const regTeacher = await request("POST", "/api/register", {
       body: {
         role: "teacher",
-        name: "Smoke Teacher",
+        name: "Alex Rivera",
         subject: "Maths",
         email: teacherEmail,
+        phone: `+9198${phoneStamp}1`,
         password
       }
     });
@@ -169,8 +181,9 @@ async function main() {
     const regStudent = await request("POST", "/api/register", {
       body: {
         role: "student",
-        name: "Smoke Kid",
+        name: "Jordan Lee",
         email: studentEmail,
+        phone: `+9198${phoneStamp}2`,
         password
       }
     });
@@ -179,8 +192,9 @@ async function main() {
     const shortPass = await request("POST", "/api/register", {
       body: {
         role: "student",
-        name: "Tiny",
-        email: `tiny-${stamp}@test.local`,
+        name: "Casey Ng",
+        email: `casey.${stamp}@example.test`,
+        phone: "+919999999999",
         password: "short"
       }
     });
@@ -205,10 +219,7 @@ async function main() {
     });
     assert.strictEqual(actStudent.status, 200, actStudent.raw);
 
-    const teacherLogin = await request("POST", "/api/login", {
-      body: { email: teacherEmail, password, role: "teacher" }
-    });
-    assert.strictEqual(teacherLogin.status, 200, teacherLogin.raw);
+    const teacherLogin = await loginWith2fa(teacherEmail, password);
     const teacherCookie = teacherLogin.cookie;
     const studentId = pendingStudent.id;
 
@@ -221,7 +232,7 @@ async function main() {
         studentIds: [studentId],
         meetingProvider: "none",
         meetingMode: "none",
-        topic: "Single class"
+        topic: "Intro lesson"
       }
     });
     assert.strictEqual(once.status, 201, once.raw);
@@ -240,7 +251,7 @@ async function main() {
         studentIds: [studentId],
         meetingProvider: "none",
         meetingMode: "none",
-        topic: "Month series"
+        topic: "Weekly series"
       }
     });
     assert.strictEqual(series.status, 201, series.raw);
@@ -259,17 +270,14 @@ async function main() {
         studentIds: [studentId],
         meetingProvider: "none",
         meetingMode: "none",
-        topic: "Three times a day alternate"
+        topic: "Alternate multi-slot series"
       }
     });
     assert.strictEqual(alternate.status, 201, alternate.raw);
     // 7 days alternate => days 0,2,4,6 = 4 days * 3 times = 12
     assert.strictEqual(alternate.json.count, 12, `expected 12 classes, got ${alternate.json.count}`);
 
-    const studentLogin = await request("POST", "/api/login", {
-      body: { email: studentEmail, password, role: "student" }
-    });
-    assert.strictEqual(studentLogin.status, 200, studentLogin.raw);
+    const studentLogin = await loginWith2fa(studentEmail, password);
     const studentDash = await request("GET", "/api/dashboard", { cookie: studentLogin.cookie });
     assert.strictEqual(studentDash.status, 200);
     assert.ok((studentDash.json.classes || []).length >= 1, "student sees classes");
@@ -287,7 +295,84 @@ async function main() {
     });
     assert.strictEqual(unauthorized.status, 403);
 
-    console.log("All smoke tests passed.");
+    // A class time is a wall clock in the teacher's zone, not the server's.
+    const zoned = await request("POST", "/api/classes", {
+      cookie: teacherLogin.cookie,
+      body: {
+        scheduleMode: "once",
+        timeZone: "Asia/Kolkata",
+        dateTime: "2026-09-01T16:00",
+        durationMinutes: 45,
+        studentIds: [studentId],
+        meetingProvider: "none",
+        meetingMode: "none",
+        topic: "Timezone check"
+      }
+    });
+    assert.strictEqual(zoned.status, 201, zoned.raw);
+    assert.strictEqual(
+      zoned.json.classItem.dateTime,
+      "2026-09-01T10:30:00.000Z",
+      `16:00 IST should store as 10:30Z, got ${zoned.json.classItem.dateTime}`
+    );
+
+    // Inactive kids cannot be scheduled, and the error says why.
+    const pendingKidEmail = `pending.${stamp}@example.test`;
+    const pendingKid = await request("POST", "/api/register", {
+      body: {
+        role: "student",
+        name: "Pending Kid",
+        email: pendingKidEmail,
+        phone: "+919825285643",
+        password
+      }
+    });
+    assert.strictEqual(pendingKid.status, 201, pendingKid.raw);
+    const pendingDash = await request("GET", "/api/dashboard", { cookie: adminLogin.cookie });
+    const pendingKidId = (pendingDash.json.managedUsers || []).find((entry) => entry.email === pendingKidEmail).id;
+    const pendingSchedule = await request("POST", "/api/classes", {
+      cookie: teacherLogin.cookie,
+      body: {
+        scheduleMode: "once",
+        dateTime: "2026-09-02T10:00",
+        durationMinutes: 45,
+        studentIds: [pendingKidId],
+        meetingProvider: "none",
+        meetingMode: "none"
+      }
+    });
+    assert.strictEqual(pendingSchedule.status, 400, pendingSchedule.raw);
+    assert.ok(/active/i.test(pendingSchedule.json.error), "pending kid error mentions activation");
+
+    // Cancelling one class, then a whole series.
+    const cancelOne = await request("DELETE", `/api/classes/${zoned.json.classItem.id}?scope=single`, {
+      cookie: teacherLogin.cookie
+    });
+    assert.strictEqual(cancelOne.status, 200, cancelOne.raw);
+    assert.strictEqual(cancelOne.json.removed, 1);
+
+    const seriesId = series.json.classItem.seriesId;
+    const seriesSize = series.json.count;
+    const cancelSeries = await request("DELETE", `/api/classes/${series.json.classItem.id}?scope=series`, {
+      cookie: teacherLogin.cookie
+    });
+    assert.strictEqual(cancelSeries.status, 200, cancelSeries.raw);
+    assert.strictEqual(cancelSeries.json.removed, seriesSize, "whole series cancelled");
+
+    const afterCancel = await request("GET", "/api/dashboard", { cookie: teacherLogin.cookie });
+    assert.ok(
+      !(afterCancel.json.classes || []).some((entry) => entry.seriesId === seriesId),
+      "cancelled series is gone from the dashboard"
+    );
+
+    // A kid cannot cancel a class.
+    const remainingClassId = (afterCancel.json.classes || [])[0].id;
+    const kidCancel = await request("DELETE", `/api/classes/${remainingClassId}`, {
+      cookie: studentLogin.cookie
+    });
+    assert.strictEqual(kidCancel.status, 403, "students cannot cancel classes");
+
+    console.log("All API tests passed.");
   } finally {
     await new Promise((resolve) => server.close(resolve));
     try {
@@ -299,6 +384,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("Smoke tests failed:", error);
+  console.error("API tests failed:", error);
   process.exit(1);
 });
